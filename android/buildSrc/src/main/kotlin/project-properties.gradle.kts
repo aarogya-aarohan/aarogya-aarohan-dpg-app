@@ -5,16 +5,20 @@ import java.io.FileNotFoundException
 import java.io.InputStreamReader
 import java.util.Properties
 
-fun readProperties(file: String): Properties {
+// A missing file is not an error: every setting has a default, so a fresh clone builds as-is.
+// A file named explicitly with -PlocalPropertiesFile / -PkeystorePropertiesFile must exist, though.
+fun readProperties(file: String, explicitlySet: Boolean): Properties {
   val properties = Properties()
-  val localProperties = File(file)
-  if (localProperties.isFile) {
-    InputStreamReader(FileInputStream(localProperties), Charsets.UTF_8).use { reader
-      ->
+  val propertiesFile = File(file)
+  if (propertiesFile.isFile) {
+    InputStreamReader(FileInputStream(propertiesFile), Charsets.UTF_8).use { reader ->
       properties.load(reader)
     }
+  } else if (explicitlySet) {
+    throw FileNotFoundException("\u001B[34mFile $file not found\u001B[0m")
+  } else {
+    logger.info("$file not found; using default values")
   }
-  else  throw FileNotFoundException("\u001B[34mFile $file not found\u001B[0m")
 
   return properties
 }
@@ -49,7 +53,16 @@ val placeholderDefaults =
     "SITE_LIST_URL" to "https://fhir.example.org/sites.json",
   )
 
-val localProperties = readProperties((project.properties["localPropertiesFile"] ?: "${rootProject.projectDir}/local.properties").toString())
+// Optional services: an empty value turns the service off, so that is also the default when the
+// setting is missing. Never fill these with fake keys, or the app would report to a non-existent
+// project.
+val optionalServiceProperties = setOf("MAPBOX_SDK_TOKEN", "POSTHOG_API_KEY", "POSTHOG_HOST")
+
+val localProperties =
+  readProperties(
+    (project.properties["localPropertiesFile"] ?: "${rootProject.projectDir}/local.properties").toString(),
+    explicitlySet = project.hasProperty("localPropertiesFile"),
+  )
 
 requiredFhirProperties.forEach { property ->
   val configured: String? = localProperties.getProperty(property)
@@ -60,6 +73,7 @@ requiredFhirProperties.forEach { property ->
         configured?.takeIf { it.isNotBlank() } ?: placeholderDefaults.getValue(property)
       // An empty value here is deliberate (it turns the service off), so keep it.
       configured != null -> configured
+      property in optionalServiceProperties -> ""
       else -> "sample_$property"
     }
   // Canonical URLs are built as "$base/fhir/StructureDefinition/...", so drop any trailing slash.
@@ -68,7 +82,11 @@ requiredFhirProperties.forEach { property ->
 
 // Set required keystore properties
 val requiredKeystoreProperties = listOf("KEYSTORE_ALIAS", "KEY_PASSWORD", "KEYSTORE_PASSWORD")
-val keystoreProperties = readProperties((project.properties["keystorePropertiesFile"] ?: "${rootProject.projectDir}/keystore.properties").toString())
+val keystoreProperties =
+  readProperties(
+    (project.properties["keystorePropertiesFile"] ?: "${rootProject.projectDir}/keystore.properties").toString(),
+    explicitlySet = project.hasProperty("keystorePropertiesFile"),
+  )
 
 requiredKeystoreProperties.forEach { property ->
   project.extra.set(property, keystoreProperties.getProperty(property,"sample_" + property))

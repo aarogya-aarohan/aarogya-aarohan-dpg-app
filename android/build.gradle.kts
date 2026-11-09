@@ -38,8 +38,46 @@ tasks.dokkaHtmlMultiModule {
   }
 }
 
+// The customised Android FHIR SDK libraries (org.smartregister:data-capture, engine, workflow, …)
+// are not on a public repository: host them on a Maven repository you control and set its address
+// and login in local.properties (see local.properties.example and docs/developer-setup-guide.md).
+val sdkRepoProperties =
+  Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+  }
+
+fun sdkRepoSetting(name: String): String? =
+  sdkRepoProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
+    ?: System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }
+
+val sdkMavenUrl: String = sdkRepoSetting("SDK_MAVEN_URL") ?: "https://maven.example.org/android-fhir-sdk"
+val sdkMavenUsername: String? = sdkRepoSetting("SDK_MAVEN_USERNAME")
+val sdkMavenPassword: String? = sdkRepoSetting("SDK_MAVEN_PASSWORD")
+
 allprojects {
   repositories {
+    // The customised Android FHIR SDK libraries come only from SDK_MAVEN_URL (see above).
+    exclusiveContent {
+      forRepository {
+        maven {
+          name = "androidFhirSdk"
+          url = uri(sdkMavenUrl)
+          if (sdkMavenUsername != null || sdkMavenPassword != null) {
+            credentials {
+              username = sdkMavenUsername
+              password = sdkMavenPassword
+            }
+          }
+        }
+      }
+      filter {
+        includeModuleByRegex(
+          "org\\.smartregister",
+          "common|contrib-barcode|contrib-locationwidget|data-capture|engine|knowledge|workflow",
+        )
+      }
+    }
     gradlePluginPortal()
     mavenLocal()
     google()
@@ -52,18 +90,6 @@ allprojects {
     maven(url = "https://central.sonatype.com/repository/maven-snapshots")
     maven(url = "https://repository.liferay.com/nexus/content/repositories/public")
     maven { url = uri("https://jitpack.io") }
-    maven {
-      url = uri("https://maven.pkg.github.com/midas-in/android-fhir")
-      credentials {
-        val localProperties = Properties()
-        val localPropertiesFile = project.rootProject.file("local.properties")
-        if (localPropertiesFile.exists()) {
-          localProperties.load(localPropertiesFile.inputStream())
-        }
-        username = localProperties.getProperty("gpr.user") ?: System.getenv("GITHUB_USER")
-        password = localProperties.getProperty("gpr.key") ?: System.getenv("GITHUB_TOKEN")
-      }
-    }
     tasks.dependencyCheckAggregate{
       dependencyCheck.formats.add("XML")
     }

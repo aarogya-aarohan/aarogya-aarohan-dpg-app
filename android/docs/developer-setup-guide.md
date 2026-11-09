@@ -17,14 +17,11 @@ You do not need prior Android experience. Follow the steps in order, and don't s
 - [Step 1: Install Git](#step-1-install-git)
 - [Step 2: Install Java 17](#step-2-install-java-17)
 - [Step 3: Install Android Studio and the Android SDK](#step-3-install-android-studio-and-the-android-sdk)
-- [Step 4: Create a GitHub access token](#step-4-create-a-github-access-token)
-- [Step 5: Download the code](#step-5-download-the-code)
-- [Step 6: Add the OpenCV library](#step-6-add-the-opencv-library)
-- [Step 7: Create `local.properties`](#step-7-create-localproperties)
-- [Step 8: Create `keystore.properties`](#step-8-create-keystoreproperties)
-- [Step 9: Build the debug APK](#step-9-build-the-debug-apk)
-- [Step 10: Run the app on a phone or emulator](#step-10-run-the-app-on-a-phone-or-emulator)
-- [Step 11: Build a signed release APK](#step-11-build-a-signed-release-apk)
+- [Step 4: Download the code](#step-4-download-the-code)
+- [Step 5: Create `local.properties`](#step-5-create-localproperties)
+- [Step 6: Build the debug APK](#step-6-build-the-debug-apk)
+- [Step 7: Run the app on a phone or emulator](#step-7-run-the-app-on-a-phone-or-emulator)
+- [Step 8: Build a signed release APK](#step-8-build-a-signed-release-apk)
 - [Point the app at your own server](#point-the-app-at-your-own-server)
 - [Optional: Work in Android Studio](#optional-work-in-android-studio)
 - [Troubleshooting](#troubleshooting)
@@ -41,7 +38,7 @@ You do not need prior Android experience. Follow the steps in order, and don't s
 | Memory (RAM) | **16 GB recommended.** The build reserves 8 GB for Gradle. 8 GB machines may fail with "out of memory". |
 | Free disk space | At least **20 GB** (Android Studio, SDK, emulator image, build caches) |
 | Internet | Needed for the first build. Later builds work mostly from cache. |
-| GitHub account | Free. You need it for one library download ([Step 4](#step-4-create-a-github-access-token)). |
+| FHIR SDK library repository | A Maven repository hosting the customised Android FHIR SDK libraries, and its login if it needs one ([Step 5.2](#52-fhir-sdk-library-repository-required)) |
 | Android phone (optional) | Android **10 or newer**, with a camera. An emulator works for most screens, but the screening camera works best on a real phone. |
 
 Tools you will install:
@@ -130,7 +127,7 @@ The first line must contain **`17`**, for example `openjdk version "17.0.x"`. If
    - **Android SDK Platform-Tools**
    - **Android Emulator** (only if you will use an emulator)
 6. Click **Apply** and wait for the downloads.
-7. Copy the **Android SDK Location** shown at the top of the SDK Manager window. You need it in [Step 7](#step-7-create-localproperties). It is usually:
+7. Copy the **Android SDK Location** shown at the top of the SDK Manager window. You need it in [Step 5](#step-5-create-localproperties). It is usually:
 
 | System | Typical SDK location |
 |---|---|
@@ -147,32 +144,7 @@ You should see `android-35` in the list.
 
 ---
 
-## Step 4: Create a GitHub access token
-
-The app uses customised versions of two Google Android FHIR SDK libraries, `data-capture` (forms) and `workflow`. They are published on **GitHub Packages**, and GitHub requires a login to download from it, **even for public packages**. Without a token, the build fails with `401 Unauthorized`.
-
-Create a token that can only *read* packages:
-
-1. Sign in to <https://github.com>.
-2. Open <https://github.com/settings/tokens> (**Settings → Developer settings → Personal access tokens → Tokens (classic)**).
-3. Click **Generate new token → Generate new token (classic)**.
-4. **Note:** `fhircore build`. **Expiration:** your choice (for example 90 days).
-5. Tick **only** `read:packages`. Leave everything else unticked.
-6. Click **Generate token** and **copy it now**. It starts with `ghp_`, and GitHub shows it only once.
-
-Keep the token private, like a password. You will put it in [Step 7](#step-7-create-localproperties).
-
-**Check (optional):** replace `YOUR_USERNAME` and `YOUR_TOKEN` and run:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -u YOUR_USERNAME:YOUR_TOKEN https://maven.pkg.github.com/midas-in/android-fhir/org/smartregister/data-capture/1.1.0-preview12-build8-SNAPSHOT/maven-metadata.xml
-```
-
-`200` means the token works. `401` means the username or token is wrong, or the token lacks `read:packages`. (On Windows PowerShell, type `curl.exe` instead of `curl`.)
-
----
-
-## Step 5: Download the code
+## Step 4: Download the code
 
 Choose a folder for your projects, then clone:
 
@@ -196,100 +168,58 @@ You should see `gradlew`, `settings.gradle.kts`, `quest`, `engine` and `geowidge
 
 ---
 
-## Step 6: Add the OpenCV library
+## Step 5: Create `local.properties`
 
-The app uses **OpenCV 4.11.0** for image processing. The build reads it from a file, `quest/libs/opencv-411-android.aar`, and that file is not stored in git, so download it once from Maven Central.
+`local.properties` holds settings for **your machine only**: where your Android SDK is, where the build downloads the customised FHIR SDK libraries from, and which servers the app talks to. It is ignored by git, so it is never committed. The repository has a template, `local.properties.example`, that lists every setting with an explanation.
 
-**macOS / Linux:**
+From the `android` folder, copy the template:
 
-```bash
-mkdir -p quest/libs
-curl -fL -o quest/libs/opencv-411-android.aar https://repo1.maven.org/maven2/org/opencv/opencv/4.11.0/opencv-4.11.0.aar
-```
+- macOS / Linux: `cp local.properties.example local.properties`
+- Windows: `copy local.properties.example local.properties`
 
-**Windows (PowerShell):**
+Then open `local.properties` in a plain-text editor (TextEdit in plain-text mode, Notepad, or VS Code) and fill it in.
 
-```powershell
-New-Item -ItemType Directory -Force quest\libs | Out-Null
-Invoke-WebRequest -Uri https://repo1.maven.org/maven2/org/opencv/opencv/4.11.0/opencv-4.11.0.aar -OutFile quest\libs\opencv-411-android.aar
-```
+### 5.1 Android SDK location (required)
 
-**Check:** the file exists and is about **110 MB**.
+Do **one** of these:
 
-- macOS/Linux: `ls -lh quest/libs`
-- Windows: `dir quest\libs`
+- Open the `android` folder in Android Studio once ([Optional: Work in Android Studio](#optional-work-in-android-studio)). Android Studio adds the `sdk.dir` line for you.
+- Or remove the `#` in front of `sdk.dir=` and add the SDK location from Step 3, for example `sdk.dir=/Users/your-name/Library/Android/sdk`. On Windows, double the backslashes and escape the colon: `sdk.dir=C\:\\Users\\your-name\\AppData\\Local\\Android\\Sdk`.
+- Or leave `sdk.dir` out and set the `ANDROID_HOME` environment variable to the SDK location instead.
 
-If you want to confirm the exact file, its SHA-256 is `c21ae9c7bb88795e7abefac74b83c458022298248b4ee72fbf62df7f085dbda7` (`shasum -a 256 quest/libs/opencv-411-android.aar` on macOS, `Get-FileHash quest\libs\opencv-411-android.aar` on Windows).
+### 5.2 FHIR SDK library repository (required)
 
----
+The app uses customised builds of Google's [Android FHIR SDK](https://github.com/google/android-fhir): `org.smartregister:data-capture`, `engine`, `workflow`, `knowledge`, `common`, `contrib-barcode` and `contrib-locationwidget`. They are not on Maven Central, so they must be published to a Maven repository that you control (for example GitHub Packages, a Nexus or Artifactory server, or any static HTTPS folder in Maven layout). The exact versions are listed in `gradle/libs.versions.toml`.
 
-## Step 7: Create `local.properties`
+| Setting | Set it to |
+|---|---|
+| `SDK_MAVEN_URL` | The repository address, for example `https://maven.pkg.github.com/<owner>/<repo>` |
+| `SDK_MAVEN_USERNAME` | The login user name, or empty if the repository needs no login |
+| `SDK_MAVEN_PASSWORD` | The login password or token, or empty if the repository needs no login |
 
-`local.properties` holds settings for **your machine only**: where your Android SDK is, which server the app talks to, and your GitHub token. The build stops if this file is missing.
+For **GitHub Packages**, the user name is your GitHub **username** (not your email), and the password is a personal access token (classic) that has **only** the `read:packages` permission. Create one at <https://github.com/settings/tokens>. GitHub requires a login even for public packages.
 
-Create or replace `android/local.properties` with the content below. If the file already exists, **replace everything in it**. Use any plain-text editor (TextEdit in plain-text mode, Notepad, or VS Code).
+These three settings can also be given as environment variables with the same names, which is useful on build servers.
 
-```properties
-# --- Your machine ---
-# The Android SDK location from Step 3.
-sdk.dir=/Users/your-name/Library/Android/sdk
+### 5.3 Your servers (needed to use the app, not to build it)
 
-# --- GitHub Packages login (Step 4) ---
-gpr.user=your-github-username
-gpr.key=ghp_your_token_here
+`FHIR_BASE_URL`, `URL`, `OAUTH_BASE_URL`, `OAUTH_CLIENT_ID`, `OAUTH_SCOPE`, `SITE_LIST_URL`, `FHIR_CANONICAL_BASE_URL` and `OPENSRP_APP_ID` tell the app where your backend is. When they are empty, the build uses `example.org` placeholders: the app builds and opens, but has no sites to show and nothing to log in to. [Point the app at your own server](#point-the-app-at-your-own-server) explains each one.
 
-# --- Server the app connects to ---
-# Placeholders are fine for building. For your own deployment, see
-# "Point the app at your own server" in this guide.
-URL=https://fhir.example.org/fhir/
-FHIR_BASE_URL=https://fhir.example.org/fhir/
-OAUTH_BASE_URL=https://auth.example.org/realms/example/
-OAUTH_CLIENT_ID=fhircore-app
-OAUTH_SCOPE=openid
+### 5.4 Optional services
 
-# Where the "Select your site" list is downloaded from.
-SITE_LIST_URL=https://fhir.example.org/sites.json
-
-# Base of this app's own FHIR extension, code system and identifier URLs.
-# It must match the URLs used in your server's StructureMaps and feature flags.
-FHIR_CANONICAL_BASE_URL=https://fhir.example.org
-
-# Keep the double quotes on this one line exactly as shown.
-OPENSRP_APP_ID="app"
-
-# --- Optional services. Leave empty to turn them off. ---
-MAPBOX_SDK_TOKEN=
-POSTHOG_API_KEY=
-POSTHOG_HOST=
-```
+`MAPBOX_SDK_TOKEN`, `POSTHOG_API_KEY` and `POSTHOG_HOST` switch on maps and analytics. Leave them empty to keep those services off.
 
 Rules that trip people up:
 
-1. **`sdk.dir` on Windows** needs doubled backslashes, and the colon escaped:
-   `sdk.dir=C\:\\Users\\your-name\\AppData\\Local\\Android\\Sdk`
-2. **No quotes** around URLs, client IDs, scopes or keys. **The one exception** is `OPENSRP_APP_ID="app"`, which **must** keep its quotes.
-3. **Keep `POSTHOG_API_KEY=` and `POSTHOG_HOST=` present, even when empty.** If you delete these lines, the build fills in fake `sample_...` values, and the app sends analytics to a key that doesn't exist.
-4. Prefer not to store the token in a file? Delete the two `gpr.` lines and set environment variables `GITHUB_USER` and `GITHUB_TOKEN` in your terminal instead.
+1. **No quotes** around URLs, user names, client IDs, scopes or keys. **The one exception** is `OPENSRP_APP_ID`, which **must** have quotes, for example `OPENSRP_APP_ID="app"`.
+2. Keep the file directly inside `android/`, next to `gradlew`, not inside `quest/`.
+3. **Never commit `local.properties`.** It is ignored by git; keep it that way.
 
-> **Which server?** With the placeholder values above, the app builds and opens, but it has no sites to show and nothing to log in to. To use it for real, you need your own servers and must set these values for them. [Point the app at your own server](#point-the-app-at-your-own-server) explains every setting.
+**Check:** `cat local.properties` (Windows: `type local.properties`) shows your values, and `SDK_MAVEN_URL` is not empty.
 
 ---
 
-## Step 8: Create `keystore.properties`
-
-The build also reads `android/keystore.properties`, even for debug builds. For now, create or replace it with placeholder values:
-
-```properties
-KEYSTORE_ALIAS=placeholder
-KEY_PASSWORD=placeholder
-KEYSTORE_PASSWORD=placeholder
-```
-
-Debug builds do not use these values. You will fill in real ones in [Step 11](#step-11-build-a-signed-release-apk), when you make a release build.
-
----
-
-## Step 9: Build the debug APK
+## Step 6: Build the debug APK
 
 A **debug APK** is for testing on your own devices. It is signed with an automatic development key, so you need no keystore.
 
@@ -327,7 +257,7 @@ The file is large, about **550 MB**. That is expected: it bundles image-processi
 
 ---
 
-## Step 10: Run the app on a phone or emulator
+## Step 7: Run the app on a phone or emulator
 
 ### Option A: A real Android phone (recommended)
 
@@ -377,11 +307,11 @@ To set up **your own** servers and site list, see [Point the app at your own ser
 
 ---
 
-## Step 11: Build a signed release APK
+## Step 8: Build a signed release APK
 
 A **release APK** is the version you give to users. It must be signed with **your own private key** (a "keystore"). Android only installs an update when it is signed with the same key as the installed app, so **if you lose the keystore or its password, you can never update that app again.** Back it up somewhere safe, outside the project folder.
 
-### 11.1 Create your keystore (once)
+### 8.1 Create your keystore (once)
 
 From the `android` folder, run the line for your system. `keytool` comes with Java 17.
 
@@ -405,9 +335,9 @@ It asks for:
 
 The build always looks for the keystore at **`quest/opensrp.jks`**, so keep that exact name and location. Git is already set to ignore `*.jks` files.
 
-### 11.2 Fill in `keystore.properties`
+### 8.2 Fill in `keystore.properties`
 
-Replace the placeholders from Step 8 with your real values:
+`android/keystore.properties` is in the repository with empty values (debug builds don't use them). Fill in your real values:
 
 ```properties
 KEYSTORE_ALIAS=release
@@ -415,15 +345,15 @@ KEY_PASSWORD=the-key-password-you-chose
 KEYSTORE_PASSWORD=the-keystore-password-you-chose
 ```
 
-If you pressed Enter for the key password in 11.1, `KEY_PASSWORD` is the same as `KEYSTORE_PASSWORD`.
+If you pressed Enter for the key password in 8.1, `KEY_PASSWORD` is the same as `KEYSTORE_PASSWORD`.
 
-On build servers, you can instead set the environment variables `KEYSTORE_ALIAS`, `KEY_PASSWORD` and `KEYSTORE_PASSWORD`. They override the file, but the file must still exist (the placeholder version is enough).
+On build servers, you can instead set the environment variables `KEYSTORE_ALIAS`, `KEY_PASSWORD` and `KEYSTORE_PASSWORD`. They override the file.
 
-### 11.3 AI screening (optional)
+### 8.3 AI screening (optional)
 
 The app is built **without** an AI model by default, and the release build does not need one. To include an AI screening model, follow the [AI model integration guide](ai-model-integration-guide.md).
 
-### 11.4 Build
+### 8.4 Build
 
 macOS / Linux:
 
@@ -443,7 +373,7 @@ Windows:
 quest/build/outputs/apk/opensrp/release/quest-opensrp-release.apk
 ```
 
-### 11.5 Verify the signature (recommended)
+### 8.5 Verify the signature (recommended)
 
 `apksigner` is in your SDK's `build-tools` folder. Replace `35.0.0` with whichever version you have; `ls ~/Library/Android/sdk/build-tools` lists them.
 
@@ -459,9 +389,9 @@ Windows:
 & "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0\apksigner.bat" verify --print-certs quest\build\outputs\apk\opensrp\release\quest-opensrp-release.apk
 ```
 
-You should see `Signer #1 certificate DN: CN=...`, showing the details you entered in 11.1.
+You should see `Signer #1 certificate DN: CN=...`, showing the details you entered in 8.1.
 
-### 11.6 Install the release APK
+### 8.6 Install the release APK
 
 ```bash
 adb install -r quest/build/outputs/apk/opensrp/release/quest-opensrp-release.apk
@@ -489,7 +419,7 @@ The output is `quest/build/outputs/bundle/opensrpRelease/quest-opensrp-release.a
 
 ## Point the app at your own server
 
-The app has no built-in server. To log in, sync and screen, you need your own backend, and must tell the app where it is. All the settings below go in `android/local.properties` ([Step 7](#step-7-create-localproperties)). They are read **at build time**, so **rebuild and reinstall** the app after changing any of them.
+The app has no built-in server. To log in, sync and screen, you need your own backend, and must tell the app where it is. All the settings below go in `android/local.properties` ([Step 5](#step-5-create-localproperties)). They are read **at build time**, so **rebuild and reinstall** the app after changing any of them.
 
 ### 1. What you need
 
@@ -590,7 +520,7 @@ Everything above works from the terminal. To browse and edit the code in Android
 4. In **Build → Select Build Variant**, set `quest` to **`opensrpDebug`**.
 5. Choose your phone or emulator in the device dropdown, then press the green ▶ **Run** button.
 
-To build a release APK from the menu instead, use **Build → Generate Signed App Bundle / APK…**, choose **APK**, point it at `quest/opensrp.jks`, and pick the **opensrpRelease** variant. The Gradle command in Step 11 does the same thing with less clicking.
+To build a release APK from the menu instead, use **Build → Generate Signed App Bundle / APK…**, choose **APK**, point it at `quest/opensrp.jks`, and pick the **opensrpRelease** variant. The Gradle command in Step 8 does the same thing with less clicking.
 
 ---
 
@@ -598,25 +528,21 @@ To build a release APK from the menu instead, use **Build → Generate Signed Ap
 
 Find your error message below. If it isn't here, scroll up in the build output to the **first** line containing `What went wrong:`. That line usually names the real problem.
 
-### `File .../local.properties not found` or `File .../keystore.properties not found`
-
-The file is missing or in the wrong folder. Both files belong directly inside `android/`, next to `gradlew`, not inside `quest/`. See [Step 7](#step-7-create-localproperties) and [Step 8](#step-8-create-keystoreproperties).
-
 ### `SDK location not found` / `The SDK directory '...' does not exist`
 
-`sdk.dir` in `local.properties` is wrong. Copy the exact path from **SDK Manager → Android SDK Location**. On Windows, remember the `C\:\\...` escaping.
+The build can't find the Android SDK. Fix `sdk.dir` in `local.properties`, or set `ANDROID_HOME` ([Step 5.1](#51-android-sdk-location-required)). Copy the exact path from **SDK Manager → Android SDK Location**. On Windows, remember the `C\:\\...` escaping.
 
-### `Received status code 401 from server: Unauthorized` (URL contains `maven.pkg.github.com`)
+### `Could not resolve org.smartregister:...` mentioning `maven.example.org`
 
-Your GitHub token is missing, wrong or expired, or it lacks the `read:packages` permission. Check `gpr.user` and `gpr.key` in `local.properties`, or make a new token ([Step 4](#step-4-create-a-github-access-token)). `gpr.user` must be your GitHub **username**, not your email.
+`SDK_MAVEN_URL` is not set, so the build used the placeholder address. Set it in `local.properties` ([Step 5.2](#52-fhir-sdk-library-repository-required)).
 
-### `Could not find org.smartregister:data-capture:...` or `...workflow:...`
+### `Could not find org.smartregister:...` (searched in your repository)
 
-This is usually the same token problem as above. If the token check in Step 4 returns `200`, run the build again with `--refresh-dependencies`.
+Your repository doesn't have that library at that exact version. Compare the versions in `gradle/libs.versions.toml` with what is published, then run the build again with `--refresh-dependencies`.
 
-### Errors mentioning `org.opencv`, `Unresolved reference: opencv` or `opencv-411-android.aar`
+### `Received status code 401 from server: Unauthorized` or `403 Forbidden`
 
-The OpenCV file is missing or misnamed. It must be exactly `quest/libs/opencv-411-android.aar`. Redo [Step 6](#step-6-add-the-opencv-library).
+The login for `SDK_MAVEN_URL` is missing, wrong or expired. Check `SDK_MAVEN_USERNAME` and `SDK_MAVEN_PASSWORD` in `local.properties`. For GitHub Packages, the user name must be your GitHub **username**, not your email, and the token needs the `read:packages` permission.
 
 ### Wrong Java version
 
@@ -643,7 +569,7 @@ The quotes are missing. The line must be exactly `OPENSRP_APP_ID="app"`.
 
 ### `Keystore file '.../quest/opensrp.jks' not found for signing config 'release'`
 
-The keystore must be at `android/quest/opensrp.jks`. See [11.1](#111-create-your-keystore-once).
+The keystore must be at `android/quest/opensrp.jks`. See [8.1](#81-create-your-keystore-once).
 
 ### `Keystore was tampered with, or password was incorrect` / `Cannot recover key`
 
@@ -651,7 +577,7 @@ A password in `keystore.properties` doesn't match the keystore, or `KEYSTORE_ALI
 
 ### `INSTALL_FAILED_UPDATE_INCOMPATIBLE`
 
-A copy of the app signed with a different key is already installed. See [11.6](#116-install-the-release-apk).
+A copy of the app signed with a different key is already installed. See [8.6](#86-install-the-release-apk).
 
 ### `adb: command not found`
 
@@ -673,7 +599,7 @@ The site list is downloaded from `SITE_LIST_URL`. Check that it points to your s
 ./gradlew :quest:assembleOpensrpDebug --stacktrace
 ```
 
-`--stacktrace` prints more detail. Include that output if you ask the maintainers for help, but **remove your token and passwords from anything you paste**.
+`--stacktrace` prints more detail. Include that output if you ask the maintainers for help, but **remove any passwords, tokens or keys from anything you paste**.
 
 ---
 
@@ -709,7 +635,7 @@ Output locations:
 
 These files contain secrets, or content we are not allowed to publish. Always check `git status` before committing.
 
-`local.properties` is already ignored by git. `keystore.properties` is tracked with empty values, so the build works on a fresh clone. Once you fill in real passwords, tell git to stop showing your local edits:
+`local.properties` is already ignored by git. `keystore.properties` is tracked with empty values (the build works without real values). Once you fill in real passwords, tell git to stop showing your local edits:
 
 ```bash
 git update-index --skip-worktree keystore.properties
@@ -717,11 +643,10 @@ git update-index --skip-worktree keystore.properties
 
 | File | Why |
 |---|---|
-| `android/local.properties` | Your GitHub token, server addresses and machine paths |
+| `android/local.properties` | Your repository login, server addresses, service keys and machine paths. Share `local.properties.example` instead |
 | `android/keystore.properties` | Your keystore passwords |
 | `android/quest/opensrp.jks` (or any `*.jks`) | Your release signing key. Anyone who has it can publish fake updates of your app. |
 | AI model weights (`*.pt`, `*.onnx`, …) | Not licensed for publication. See the [AI model integration guide](ai-model-integration-guide.md#where-the-model-file-goes). |
-| `quest/libs/opencv-411-android.aar` | Large binary; everyone downloads it themselves (Step 6) |
 | APK / AAB files | Build outputs; share them through your release channel, not git |
 
 ---

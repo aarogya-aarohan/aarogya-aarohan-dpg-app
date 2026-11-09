@@ -19,10 +19,11 @@ APK. No prior Android experience is needed.
 In short, you will:
 
 1. Install Git, Java 17 and Android Studio (with Android SDK API 35)
-2. Create a GitHub token with `read:packages` (needed to download two libraries)
-3. Clone this repository and download the OpenCV library
-4. Create `local.properties` and `keystore.properties`
-5. Build and install: `./gradlew :quest:installOpensrpDebug`
+2. Clone this repository
+3. Copy `android/local.properties.example` to `android/local.properties` and fill it in: your
+   Android SDK location, the Maven repository hosting the customised Android FHIR SDK libraries,
+   and your servers
+4. Build and install from `android/`: `./gradlew :quest:installOpensrpDebug`
 
 To add AI screening after that, see the
 [AI model integration guide](android/docs/ai-model-integration-guide.md).

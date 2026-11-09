@@ -1,0 +1,76 @@
+# Template for android/local.properties
+#
+# Copy this file to local.properties (in this same android/ folder) and fill in the values:
+#   macOS/Linux:  cp local.properties.example local.properties
+#   Windows:      copy local.properties.example local.properties
+#
+# local.properties is ignored by git. Never commit it: it holds your passwords and keys.
+# Values are read at build time, so rebuild the app after changing any of them.
+# Write values without quotes, except OPENSRP_APP_ID (see below).
+# Full explanation of every setting: docs/developer-setup-guide.md
+
+
+# ---------------------------------------------------------------------------------------------
+# REQUIRED: Android SDK location
+# ---------------------------------------------------------------------------------------------
+# Android Studio fills this in when you open the android/ folder. Alternatively, leave it out and
+# set the ANDROID_HOME environment variable instead.
+#   macOS:   sdk.dir=/Users/<your-name>/Library/Android/sdk
+#   Linux:   sdk.dir=/home/<your-name>/Android/Sdk
+#   Windows: sdk.dir=C\:\\Users\\<your-name>\\AppData\\Local\\Android\\Sdk
+#sdk.dir=
+
+
+# ---------------------------------------------------------------------------------------------
+# REQUIRED: Maven repository hosting the customised Android FHIR SDK libraries
+# ---------------------------------------------------------------------------------------------
+# The app uses customised builds of the Android FHIR SDK (org.smartregister:data-capture, engine,
+# workflow, knowledge, common, contrib-barcode, contrib-locationwidget). They are not on Maven
+# Central: publish them to a Maven repository you control and point the build at it. The build
+# fails with "Could not find org.smartregister:..." until this is set.
+# Each setting can also be given as an environment variable of the same name.
+#
+# Repository address, for example https://maven.pkg.github.com/<owner>/<repo>
+SDK_MAVEN_URL=
+# Login for that repository. Leave both empty if it needs none. For GitHub Packages, use your
+# GitHub username and a personal access token with the read:packages permission.
+SDK_MAVEN_USERNAME=
+SDK_MAVEN_PASSWORD=
+
+
+# ---------------------------------------------------------------------------------------------
+# REQUIRED TO USE THE APP: your servers
+# ---------------------------------------------------------------------------------------------
+# Not needed to build: when empty, an https://*.example.org placeholder is used and the app opens,
+# but has no sites to show and nothing to log in to.
+#
+# Default FHIR server, ending in /. Replaced by the site list once the user picks a site.
+FHIR_BASE_URL=
+# Same value as FHIR_BASE_URL.
+URL=
+# Default Keycloak realm, ending in /, for example https://auth.example.org/realms/my-realm/
+OAUTH_BASE_URL=
+# Keycloak client the app logs in with: a public client with "Direct access grants" enabled.
+OAUTH_CLIENT_ID=
+# Usually: openid
+OAUTH_SCOPE=
+# Address of the JSON site list shown on the "Select your site" screen.
+SITE_LIST_URL=
+# Base of the app's own FHIR extension, code system and identifier URLs, with no trailing slash,
+# for example https://fhir.your-org.org. Must match the URLs in your server's StructureMaps and
+# feature flags.
+FHIR_CANONICAL_BASE_URL=
+# Id of the app configuration on the FHIR server, WITH double quotes, for example "app".
+# When empty, "app" is used.
+OPENSRP_APP_ID=
+
+
+# ---------------------------------------------------------------------------------------------
+# OPTIONAL: services. Leave empty to turn the service off.
+# ---------------------------------------------------------------------------------------------
+# Mapbox access token, for the map screens.
+MAPBOX_SDK_TOKEN=
+# PostHog analytics and crash reporting: project API key and host (for example
+# https://eu.i.posthog.com). Both must be set to turn it on.
+POSTHOG_API_KEY=
+POSTHOG_HOST=

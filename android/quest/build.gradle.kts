@@ -331,7 +331,8 @@ configurations {
 }
 
 dependencies {
-  implementation(files("libs/opencv-411-android.aar"))
+  // OpenCV 4.11.0 for image-quality checks, from Maven Central.
+  implementation(libs.opencv)
 
   // AI plug-and-play: the model contract, plus every plugin named in -PaiPlugins.
   implementation(project(":ai-api"))
