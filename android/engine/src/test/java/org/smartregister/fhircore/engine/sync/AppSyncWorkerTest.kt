@@ -1,0 +1,120 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.engine.sync
+
+import androidx.work.WorkerParameters
+import androidx.work.impl.utils.taskexecutor.TaskExecutor
+import com.google.android.fhir.FhirEngine
+import com.google.android.fhir.sync.AcceptLocalConflictResolver
+import com.google.android.fhir.sync.ParamMap
+import com.google.gson.Gson
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import org.hl7.fhir.r4.model.ResourceType
+import org.junit.Assert
+import org.junit.Test
+import org.smartregister.fhircore.engine.data.remote.fhir.resource.FhirResourceService
+import org.smartregister.fhircore.engine.robolectric.RobolectricTest
+import org.smartregister.fhircore.engine.util.FeatureFlagUtil
+import org.smartregister.fhircore.engine.util.SecureSharedPreference
+import org.smartregister.fhircore.engine.util.SharedPreferencesHelper
+
+class AppSyncWorkerTest : RobolectricTest() {
+  @Test
+  fun `should create sync worker with expected properties`() {
+    val workerParams = mockk<WorkerParameters>()
+    val syncParams = emptyMap<ResourceType, ParamMap>()
+    val syncListenerManager = mockk<SyncListenerManager>()
+    val fhirEngine = mockk<FhirEngine>()
+    val taskExecutor = mockk<TaskExecutor>()
+    val timeContext = mockk<AppTimeStampContext>()
+    val fhirResourceService = mockk<FhirResourceService>()
+    val secureSharedPreference = mockk<SecureSharedPreference>()
+    val sharedPreferencesHelper = mockk<SharedPreferencesHelper>()
+    val featureFlagUtil = mockk<FeatureFlagUtil>(relaxed = true)
+
+    every { taskExecutor.serialTaskExecutor } returns mockk()
+    every { workerParams.taskExecutor } returns taskExecutor
+    every { syncListenerManager.loadSyncParams() } returns syncParams
+
+    val appSyncWorker =
+      AppSyncWorker(
+        mockk(),
+        workerParams,
+        syncListenerManager,
+        fhirEngine,
+        timeContext,
+        fhirResourceService,
+        secureSharedPreference,
+        sharedPreferencesHelper,
+        Gson(),
+        featureFlagUtil,
+        mockk(relaxed = true),
+      )
+
+    appSyncWorker.getDownloadWorkManager()
+    verify { syncListenerManager.loadSyncParams() }
+
+    Assert.assertEquals(AcceptLocalConflictResolver, appSyncWorker.getConflictResolver())
+    Assert.assertEquals(fhirEngine, appSyncWorker.getFhirEngine())
+  }
+
+  @Test
+  fun `doWork should skip duplicate sync worker when another sync is running`() = runBlocking {
+    val workerParams = mockk<WorkerParameters>()
+    val syncListenerManager = mockk<SyncListenerManager>()
+    val fhirEngine = mockk<FhirEngine>()
+    val taskExecutor = mockk<TaskExecutor>()
+    val timeContext = mockk<AppTimeStampContext>()
+    val fhirResourceService = mockk<FhirResourceService>()
+    val secureSharedPreference = mockk<SecureSharedPreference>()
+    val sharedPreferencesHelper = mockk<SharedPreferencesHelper>()
+    val featureFlagUtil = mockk<FeatureFlagUtil>(relaxed = true)
+
+    every { taskExecutor.serialTaskExecutor } returns mockk()
+    every { workerParams.taskExecutor } returns taskExecutor
+
+    val appSyncWorker =
+      AppSyncWorker(
+        mockk(),
+        workerParams,
+        syncListenerManager,
+        fhirEngine,
+        timeContext,
+        fhirResourceService,
+        secureSharedPreference,
+        sharedPreferencesHelper,
+        Gson(),
+        featureFlagUtil,
+        mockk(relaxed = true),
+      )
+
+    Assert.assertTrue(AppSyncWorker.mutex.tryLock())
+    try {
+      val result = appSyncWorker.doWork()
+      Assert.assertEquals(
+        androidx.work.ListenableWorker.Result.success().javaClass,
+        result.javaClass,
+      )
+    } finally {
+      AppSyncWorker.mutex.unlock()
+    }
+  }
+}

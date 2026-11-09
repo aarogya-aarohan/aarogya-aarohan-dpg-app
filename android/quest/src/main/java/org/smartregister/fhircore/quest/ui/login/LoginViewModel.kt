@@ -1,0 +1,568 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.login
+
+import android.content.Context
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.work.Constraints
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import dagger.hilt.android.lifecycle.HiltViewModel
+import org.smartregister.fhircore.quest.util.PostHogAnalytics
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.hl7.fhir.r4.model.Location
+import org.hl7.fhir.r4.model.Practitioner
+import org.hl7.fhir.r4.model.ResourceType
+import org.smartregister.fhircore.engine.configuration.ConfigType
+import org.smartregister.fhircore.engine.configuration.ConfigurationRegistry
+import org.smartregister.fhircore.engine.configuration.app.ApplicationConfiguration
+import org.smartregister.fhircore.engine.configuration.app.ConfigService
+import org.smartregister.fhircore.engine.data.local.DefaultRepository
+import org.smartregister.fhircore.engine.data.remote.auth.KeycloakService
+import org.smartregister.fhircore.engine.data.remote.fhir.resource.FhirResourceService
+import org.smartregister.fhircore.engine.data.remote.model.response.UserInfo
+import org.smartregister.fhircore.engine.data.remote.shared.TokenAuthenticator
+import org.smartregister.fhircore.engine.util.DispatcherProvider
+import org.smartregister.fhircore.engine.util.SecureSharedPreference
+import org.smartregister.fhircore.engine.util.SharedPreferenceKey
+import org.smartregister.fhircore.engine.util.SharedPreferencesHelper
+import org.smartregister.fhircore.engine.util.clearPasswordInMemory
+import org.smartregister.fhircore.engine.util.extension.extractLogicalIdUuid
+import org.smartregister.fhircore.engine.util.extension.getActivity
+import org.smartregister.fhircore.engine.util.extension.isDeviceOnline
+import org.smartregister.fhircore.engine.util.extension.logicalId
+import org.smartregister.fhircore.engine.util.extension.valueToString
+import org.smartregister.fhircore.quest.BuildConfig
+import org.smartregister.model.location.LocationHierarchy
+import org.smartregister.model.practitioner.PractitionerDetails
+import retrofit2.HttpException
+import timber.log.Timber
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.inject.Inject
+import org.hl7.fhir.r4.model.Bundle as FhirR4ModelBundle
+
+@HiltViewModel
+class LoginViewModel
+@Inject
+constructor(
+  val configurationRegistry: ConfigurationRegistry,
+  val accountAuthenticator: AccountAuthenticator,
+  val sharedPreferences: SharedPreferencesHelper,
+  val secureSharedPreference: SecureSharedPreference,
+  val defaultRepository: DefaultRepository,
+  val configService: ConfigService,
+  val keycloakService: KeycloakService,
+  val fhirResourceService: FhirResourceService,
+  val tokenAuthenticator: TokenAuthenticator,
+  val dispatcherProvider: DispatcherProvider,
+  val workManager: WorkManager,
+  val userSwitchManager: UserSwitchManager,
+) : ViewModel() {
+
+  private val _launchDialPad: MutableLiveData<String?> = MutableLiveData(null)
+  val launchDialPad
+    get() = _launchDialPad
+
+  private val _navigateToHome = MutableLiveData(false)
+  val navigateToHome: LiveData<Boolean>
+    get() = _navigateToHome
+
+  private val _username = MutableLiveData("")
+  val username: LiveData<String>
+    get() = _username
+
+  private val _password = MutableLiveData("")
+  val password: LiveData<String>
+    get() = _password
+
+  private val _loginErrorState = MutableLiveData<LoginErrorState?>()
+  val loginErrorState: LiveData<LoginErrorState?>
+    get() = _loginErrorState
+
+  private val _showProgressBar = MutableLiveData(false)
+  val showProgressBar
+    get() = _showProgressBar
+
+  val applicationConfiguration: ApplicationConfiguration by lazy {
+    configurationRegistry.retrieveConfiguration(ConfigType.Application)
+  }
+
+  /**
+   * Whether the in-memory application configuration is available. It is populated by the
+   * AppSettingActivity bootstrap and lives only in memory ([ConfigurationRegistry.configsJsonMap]).
+   * After process death the OS can recreate [LoginActivity] directly, bypassing that bootstrap, so
+   * reading [applicationConfiguration] would throw [NoSuchElementException] ("Key application is
+   * missing in the map"). The activity uses this to detect that state and restart the bootstrap.
+   */
+  fun isApplicationConfigurationLoaded(): Boolean =
+    configurationRegistry.configsJsonMap.containsKey(ConfigType.Application.name)
+
+  fun onUsernameUpdated(username: String) {
+    _loginErrorState.postValue(null)
+    _username.value = username
+  }
+
+  fun onPasswordUpdated(password: String) {
+    _loginErrorState.postValue(null)
+    _password.value = password
+  }
+
+  fun login(context: Context) {
+    if (!username.value.isNullOrBlank() && !password.value.isNullOrBlank()) {
+      _loginErrorState.postValue(null)
+      _showProgressBar.postValue(true)
+
+      val trimmedUsername = username.value!!.trim()
+      val passwordAsCharArray = password.value!!.trim().toCharArray()
+
+      viewModelScope.launch(Dispatchers.IO) {
+        if (context.getActivity()!!.isDeviceOnline()) {
+          fetchToken(
+            username = trimmedUsername,
+            password = passwordAsCharArray,
+            onFetchUserInfo = {
+              if (it.isFailure) {
+                Timber.e(it.exceptionOrNull())
+                _showProgressBar.postValue(false)
+                _loginErrorState.postValue(LoginErrorState.ERROR_FETCHING_USER)
+              }
+            },
+            onFetchPractitioner = { bundleResult, userInfo ->
+              if (bundleResult.isSuccess) {
+                setPostHogConfiguration()
+                val bundle = bundleResult.getOrDefault(FhirR4ModelBundle())
+                savePractitionerDetails(bundle, userInfo) {
+                  _showProgressBar.postValue(false)
+                  updateNavigateHome(true)
+                }
+              } else {
+                _showProgressBar.postValue(false)
+                Timber.e(bundleResult.exceptionOrNull())
+                Timber.e(bundleResult.getOrNull().valueToString())
+                _loginErrorState.postValue(LoginErrorState.ERROR_FETCHING_USER)
+              }
+            },
+          )
+        } else {
+          if (secureSharedPreference.retrieveSessionUsername() == null) {
+            _showProgressBar.postValue(false)
+            _loginErrorState.postValue(LoginErrorState.INVALID_OFFLINE_STATE)
+          } else if (accountAuthenticator.validateLoginCredentials(trimmedUsername, passwordAsCharArray)) {
+            setPostHogConfiguration()
+            _showProgressBar.postValue(false)
+            updateNavigateHome(true)
+          } else {
+            _showProgressBar.postValue(false)
+            _loginErrorState.postValue(LoginErrorState.INVALID_CREDENTIALS)
+          }
+        }
+        clearPasswordInMemory(passwordAsCharArray)
+      }
+    }
+  }
+
+  private fun setPostHogConfiguration() {
+    try {
+      val flwId = secureSharedPreference.getPractitionerUserId()
+      PostHogAnalytics.identifyUser(flwId = flwId)
+    } catch (e: Exception) {
+      Timber.e(e)
+    }
+  }
+
+  fun forgotPassword() {
+    // TODO load supervisor contact e.g.
+    _launchDialPad.value = "tel:0123456789"
+  }
+
+  fun updateNavigateHome(navigateHome: Boolean = true) {
+    if (navigateHome) userSwitchManager.onLoginCompleted()
+    _navigateToHome.postValue(navigateHome)
+  }
+
+  fun isPinEnabled(): Boolean = applicationConfiguration.loginConfig.enablePin ?: false
+
+  /**
+   * This function checks first if the existing token is active otherwise fetches a new token, then
+   * gets the user information from the authentication server. The id of the retrieved user is used
+   * to obtain the [PractitionerDetails] from the FHIR server.
+   */
+  private suspend fun fetchToken(
+    username: String,
+    password: CharArray,
+    onFetchUserInfo: (Result<UserInfo>) -> Unit,
+    onFetchPractitioner: (Result<FhirR4ModelBundle>, UserInfo?) -> Unit,
+  ) {
+    val practitionerDetails =
+      sharedPreferences.read<PractitionerDetails>(
+        key = SharedPreferenceKey.PRACTITIONER_DETAILS.name,
+        decodeWithGson = true,
+      )
+    val previousUsername = secureSharedPreference.retrieveCredentials()?.username
+    val isDifferentUser = previousUsername != null && !username.equals(previousUsername, true)
+    // The still-active session belongs to the previous user, so it only short-circuits their login.
+    if (!isDifferentUser && tokenAuthenticator.sessionActive() && practitionerDetails != null) {
+      _showProgressBar.postValue(false)
+      updateNavigateHome(true)
+    } else {
+      // A different user may only log in once the previous one logged out with everything synced;
+      // otherwise their unsynced cases would be lost.
+      if (isDifferentUser && !userSwitchManager.canSwitchUser()) {
+        _showProgressBar.postValue(false)
+        _loginErrorState.postValue(LoginErrorState.MULTI_USER_LOGIN_ATTEMPT)
+      } else {
+        tokenAuthenticator
+          .fetchAccessToken(username, password)
+          .onSuccess {
+            // Cleared only now that the new user is authenticated, so a typo never wipes the device.
+            if (isDifferentUser) userSwitchManager.clearPreviousUserData(previousUsername!!)
+            fetchPractitioner(onFetchUserInfo, onFetchPractitioner)
+          }
+          .onFailure {
+            _showProgressBar.postValue(false)
+            var errorState = LoginErrorState.ERROR_FETCHING_USER
+
+            if (it is HttpException) {
+              when (it.code()) {
+                401 -> errorState = LoginErrorState.INVALID_CREDENTIALS
+              }
+            } else if (it is UnknownHostException) {
+              errorState = LoginErrorState.UNKNOWN_HOST
+            }
+
+            _loginErrorState.postValue(errorState)
+            Timber.e(it)
+          }
+      }
+    }
+  }
+
+  suspend fun fetchPractitioner(
+    onFetchUserInfo: (Result<UserInfo>) -> Unit,
+    onFetchPractitioner: (Result<FhirR4ModelBundle>, UserInfo?) -> Unit,
+  ) {
+    try {
+      val userInfo = keycloakService.fetchUserInfo().body()
+      if (userInfo != null && !userInfo.keycloakUuid.isNullOrEmpty()) {
+        writeUserInfo(userInfo = userInfo)
+        onFetchUserInfo(Result.success(userInfo))
+        try {
+          val bundle =
+            fhirResourceService.searchResource("PractitionerDetail", mapOf("keycloak-uuid" to userInfo.keycloakUuid!!))
+          onFetchPractitioner(Result.success(bundle), userInfo)
+        } catch (httpException: HttpException) {
+          onFetchPractitioner(Result.failure(httpException), userInfo)
+          Timber.e(httpException.response()?.errorBody()?.charStream()?.readText())
+        } catch (unknownHostException: UnknownHostException) {
+          onFetchPractitioner(Result.failure(unknownHostException), userInfo)
+          Timber.e(
+            unknownHostException,
+            "An error occurred fetching the practitioner details",
+          )
+        } catch (socketTimeoutException: SocketTimeoutException) {
+          onFetchPractitioner(Result.failure(socketTimeoutException), userInfo)
+          Timber.e(
+            socketTimeoutException,
+            "An error occurred fetching the practitioner details",
+          )
+        } catch (exception: Exception) {
+          onFetchPractitioner(Result.failure(exception), userInfo)
+          Timber.e(exception, "An error occurred fetching the practitioner details")
+        }
+      } else {
+        onFetchPractitioner(
+          Result.failure(NullPointerException("Keycloak user is null. Failed to fetch user.")),
+          userInfo,
+        )
+      }
+    } catch (httpException: HttpException) {
+      onFetchUserInfo(Result.failure(httpException))
+      Timber.e(httpException)
+    } catch (unknownHostException: UnknownHostException) {
+      onFetchUserInfo(Result.failure(unknownHostException))
+      Timber.e(unknownHostException, "An error occurred fetching the practitioner details")
+    } catch (socketTimeoutException: SocketTimeoutException) {
+      onFetchUserInfo(Result.failure(socketTimeoutException))
+      Timber.e(socketTimeoutException, "An error occurred fetching the practitioner details")
+    } catch (exception: Exception) {
+      onFetchUserInfo(Result.failure(exception))
+      Timber.e(exception, "An error occurred fetching the practitioner details")
+    }
+  }
+
+  fun savePractitionerDetails(
+    bundle: FhirR4ModelBundle,
+    userInfo: UserInfo?,
+    postProcess: () -> Unit,
+  ) {
+    if (bundle.entry.isNullOrEmpty()) return
+    viewModelScope.launch(Dispatchers.IO) {
+      bundle.entry.forEach { entry ->
+        val practitionerDetails = entry.resource as PractitionerDetails
+
+        val careTeams = practitionerDetails.fhirPractitionerDetails?.careTeams ?: listOf()
+        val organizations = practitionerDetails.fhirPractitionerDetails?.organizations ?: listOf()
+        val locations = practitionerDetails.fhirPractitionerDetails?.locations ?: listOf()
+        val practitioners = practitionerDetails.fhirPractitionerDetails?.practitioners ?: listOf()
+        val practitionerId = practitioners.firstOrNull()?.logicalId ?: ""
+        val locationHierarchies =
+          practitionerDetails.fhirPractitionerDetails?.locationHierarchyList ?: listOf()
+
+        val careTeamIds =
+          withContext(Dispatchers.IO) {
+            defaultRepository.createRemote(false, *careTeams.toTypedArray()).run {
+              careTeams.map { it.id.extractLogicalIdUuid() }
+            }
+          }
+        val organizationIds =
+          withContext(dispatcherProvider.io()) {
+            defaultRepository.createRemote(false, *organizations.toTypedArray()).run {
+              organizations.map { it.id.extractLogicalIdUuid() }
+            }
+          }
+        val locationIds =
+          withContext(dispatcherProvider.io()) {
+            defaultRepository.createRemote(false, *locations.toTypedArray()).run {
+              locations.map { it.id.extractLogicalIdUuid() }
+            }
+          }
+
+        val location =
+          withContext(dispatcherProvider.io()) {
+            defaultRepository.createRemote(false, *locations.toTypedArray()).run {
+              locations.map { it.name }
+            }
+          }
+
+        val careTeam =
+          withContext(dispatcherProvider.io()) {
+            defaultRepository.createRemote(false, *careTeams.toTypedArray()).run {
+              careTeams.map { it.name }
+            }
+          }
+        val organization =
+          withContext(dispatcherProvider.io()) {
+            defaultRepository.createRemote(false, *organizations.toTypedArray()).run {
+              organizations.map { it.name }
+            }
+          }
+
+        defaultRepository.createRemote(false, *practitioners.toTypedArray())
+        practitionerDetails.fhirPractitionerDetails?.groups?.toTypedArray()?.let {
+          defaultRepository.createRemote(false, *it)
+        }
+        practitionerDetails.fhirPractitionerDetails?.practitionerRoles?.toTypedArray()?.let {
+          defaultRepository.createRemote(false, *it)
+        }
+        practitionerDetails.fhirPractitionerDetails?.organizationAffiliations?.toTypedArray()?.let {
+          defaultRepository.createRemote(false, *it)
+        }
+
+        if (practitionerId.isNotEmpty()) {
+          secureSharedPreference.savePractitionerUserId(practitionerId)
+          writePractitionerDetailsToShredPref(
+            careTeam = careTeam,
+            organization = organization,
+            location = location,
+            fhirPractitionerDetails = practitionerDetails,
+            userInfo = userInfo,
+            careTeams = careTeamIds,
+            organizations = organizationIds,
+            locations = locationIds,
+            locationHierarchies = locationHierarchies,
+          )
+        } else {
+          // The assumption here is that only 1 practitioner is returned from the server in the
+          // practitioner details
+          practitioners.firstOrNull()?.identifier?.forEach { identifier ->
+            if (
+              identifier.hasUse() &&
+                identifier.use == org.hl7.fhir.r4.model.Identifier.IdentifierUse.SECONDARY &&
+                identifier.hasValue() &&
+                identifier.value == userInfo!!.keycloakUuid
+            ) {
+              writePractitionerDetailsToShredPref(
+                careTeam = careTeam,
+                organization = organization,
+                location = location,
+                fhirPractitionerDetails = practitionerDetails,
+                userInfo = userInfo,
+                careTeams = careTeamIds,
+                organizations = organizationIds,
+                locations = locationIds,
+                locationHierarchies = locationHierarchies,
+              )
+            }
+          }
+        }
+      }
+      postProcess()
+    }
+  }
+
+  private fun writeUserInfo(
+    userInfo: UserInfo?,
+  ) {
+    sharedPreferences.write(
+      key = SharedPreferenceKey.USER_INFO.name,
+      value = userInfo,
+    )
+  }
+
+  private suspend fun writePractitionerDetailsToShredPref(
+    careTeam: List<String>,
+    organization: List<String>,
+    location: List<String>,
+    fhirPractitionerDetails: PractitionerDetails,
+    userInfo: UserInfo?,
+    careTeams: List<String>,
+    organizations: List<String>,
+    locations: List<String>,
+    locationHierarchies: List<LocationHierarchy>,
+  ) {
+    sharedPreferences.write(
+      key = SharedPreferenceKey.PRACTITIONER_ID.name,
+      value = fhirPractitionerDetails.fhirPractitionerDetails?.id,
+    )
+    sharedPreferences.write(
+      SharedPreferenceKey.PRACTITIONER_DETAILS.name,
+      fhirPractitionerDetails,
+    )
+    sharedPreferences.write(ResourceType.CareTeam.name, careTeams)
+    sharedPreferences.write(ResourceType.Organization.name, organizations)
+    sharedPreferences.write(ResourceType.Location.name, locations)
+    sharedPreferences.write(
+      SharedPreferenceKey.PRACTITIONER_LOCATION_HIERARCHIES.name,
+      locationHierarchies,
+    )
+    sharedPreferences.write(
+      key = SharedPreferenceKey.PRACTITIONER_LOCATION.name,
+      value = location.joinToString(separator = ""),
+    )
+    sharedPreferences.write(
+      key = SharedPreferenceKey.CARE_TEAM.name,
+      value = careTeam.joinToString(separator = ""),
+    )
+    sharedPreferences.write(
+      key = SharedPreferenceKey.ORGANIZATION.name,
+      value = organization.joinToString(separator = ""),
+    )
+    // The FLW's state/district live on the Practitioner resource address, which the
+    // PractitionerDetail search response does not include, so the Practitioner is fetched from the
+    // FHIR server. The embedded practitioners, userInfo and assigned Locations are fallbacks. When
+    // none carry a value, null is stored (the key is removed) so the questionnaire State/District
+    // drop-downs open empty. Extraction is guarded per field so a malformed resource or a failed
+    // fetch never aborts the login flow.
+    val fhirDetails = fhirPractitionerDetails.fhirPractitionerDetails
+    val remotePractitioner =
+      fhirDetails?.practitioners?.firstOrNull()?.logicalId?.takeIf { it.isNotBlank() }?.let {
+        fetchRemotePractitioner(it)
+      }
+    val district =
+      runCatching {
+          remotePractitioner?.firstNonBlankDistrict()
+            ?: fhirDetails?.practitioners?.firstNonBlankDistrict()
+            ?: userInfo?.district
+            ?: userInfo?.dictrict
+            ?: fhirDetails?.locations?.firstNonBlankDistrict()
+        }
+        .onFailure { Timber.e(it, "Failed to extract FLW district from practitioner details") }
+        .getOrNull()
+    val state =
+      runCatching {
+          remotePractitioner?.firstNonBlankState()
+            ?: fhirDetails?.practitioners?.firstNonBlankState()
+            ?: userInfo?.state
+            ?: fhirDetails?.locations?.firstNonBlankState()
+        }
+        .onFailure { Timber.e(it, "Failed to extract FLW state from practitioner details") }
+        .getOrNull()
+    writeFlwLocationToSharedPref(district = district, state = state)
+  }
+
+  /**
+   * Fetches the FLW's Practitioner resource from the FHIR server to read its address (the
+   * district/state are not part of the PractitionerDetail search response). Returns null on any
+   * failure (offline, timeout, server error, malformed payload) so login always proceeds.
+   */
+  private suspend fun fetchRemotePractitioner(practitionerId: String): Practitioner? =
+    try {
+      fhirResourceService
+        .searchResource(ResourceType.Practitioner.name, mapOf("_id" to practitionerId))
+        .entry
+        ?.firstNotNullOfOrNull { it.resource as? Practitioner }
+    } catch (exception: Exception) {
+      Timber.e(exception, "Failed to fetch Practitioner/$practitionerId for FLW state/district")
+      null
+    }
+
+  private fun writeFlwLocationToSharedPref(district: String?, state: String?) {
+    sharedPreferences.write(
+      key = SharedPreferenceKey.FLW_DISTRICT.name,
+      value = district?.trim()?.takeIf { it.isNotEmpty() },
+    )
+    sharedPreferences.write(
+      key = SharedPreferenceKey.FLW_STATE.name,
+      value = state?.trim()?.takeIf { it.isNotEmpty() },
+    )
+  }
+
+  private fun List<Location>.firstNonBlankDistrict(): String? =
+    firstNotNullOfOrNull {
+      it.address?.district?.trim()?.takeIf { district -> district.isNotEmpty() }
+    }
+
+  private fun List<Location>.firstNonBlankState(): String? =
+    firstNotNullOfOrNull { it.address?.state?.trim()?.takeIf { state -> state.isNotEmpty() } }
+
+  @JvmName("firstNonBlankPractitionerDistrict")
+  private fun List<Practitioner>.firstNonBlankDistrict(): String? =
+    firstNotNullOfOrNull { it.firstNonBlankDistrict() }
+
+  @JvmName("firstNonBlankPractitionerState")
+  private fun List<Practitioner>.firstNonBlankState(): String? =
+    firstNotNullOfOrNull { it.firstNonBlankState() }
+
+  private fun Practitioner.firstNonBlankDistrict(): String? =
+    address?.firstNotNullOfOrNull {
+      it.district?.trim()?.takeIf { district -> district.isNotEmpty() }
+    }
+
+  private fun Practitioner.firstNonBlankState(): String? =
+    address?.firstNotNullOfOrNull { it.state?.trim()?.takeIf { state -> state.isNotEmpty() } }
+
+  fun downloadNowWorkflowConfigs(isInitialLogin: Boolean = true) {
+    val data = workDataOf(ConfigDownloadWorker.IS_INITIAL_LOGIN to isInitialLogin)
+    val oneTimeWorkRequest: OneTimeWorkRequest =
+      OneTimeWorkRequestBuilder<ConfigDownloadWorker>()
+        .setConstraints(
+          Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
+        )
+        .setInputData(data)
+        .build()
+    workManager.enqueue(oneTimeWorkRequest)
+  }
+}

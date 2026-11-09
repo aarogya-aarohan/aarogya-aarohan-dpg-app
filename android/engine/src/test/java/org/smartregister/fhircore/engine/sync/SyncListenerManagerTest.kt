@@ -1,0 +1,113 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.engine.sync
+
+import androidx.test.core.app.ApplicationProvider
+import dagger.hilt.android.testing.HiltAndroidRule
+import dagger.hilt.android.testing.HiltAndroidTest
+import dagger.hilt.android.testing.HiltTestApplication
+import javax.inject.Inject
+import org.junit.After
+import org.junit.Assert
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.robolectric.Robolectric
+import org.smartregister.fhircore.engine.R
+import org.smartregister.fhircore.engine.app.fakes.Faker
+import org.smartregister.fhircore.engine.configuration.ConfigurationRegistry
+import org.smartregister.fhircore.engine.configuration.app.ConfigService
+import org.smartregister.fhircore.engine.robolectric.RobolectricTest
+import org.smartregister.fhircore.engine.util.SecureSharedPreference
+import org.smartregister.fhircore.engine.util.SharedPreferencesHelper
+import org.smartregister.fhircore.engine.util.test.HiltActivityForTest
+
+@HiltAndroidTest
+class SyncListenerManagerTest : RobolectricTest() {
+
+  @get:Rule(order = 0) val hiltAndroidRule = HiltAndroidRule(this)
+
+  private lateinit var syncListenerManager: SyncListenerManager
+
+  private val configurationRegistry: ConfigurationRegistry = Faker.buildTestConfigurationRegistry()
+
+  @Inject lateinit var sharedPreferencesHelper: SharedPreferencesHelper
+
+  @Inject lateinit var secureSharedPreference: SecureSharedPreference
+
+  @Inject lateinit var configService: ConfigService
+
+  private val activityController = Robolectric.buildActivity(HiltActivityForTest::class.java)
+
+  private lateinit var hiltActivityForTest: HiltActivityForTest
+
+  @Before
+  fun setUp() {
+    hiltAndroidRule.inject()
+    hiltActivityForTest = activityController.get()
+    ApplicationProvider.getApplicationContext<HiltTestApplication>().setTheme(R.style.AppTheme)
+    syncListenerManager =
+      SyncListenerManager(
+        configService = configService,
+        sharedPreferencesHelper = sharedPreferencesHelper,
+        configurationRegistry = configurationRegistry,
+        secureSharedPreference = secureSharedPreference,
+      )
+  }
+
+  @After
+  fun tearDown() {
+    if (!hiltActivityForTest.isDestroyed) {
+      activityController.destroy()
+    }
+  }
+
+  @Test
+  fun testRegisterSyncListenerShouldAddNewOnSyncListener() {
+    activityController.create().resume()
+    syncListenerManager.registerSyncListener(hiltActivityForTest, hiltActivityForTest.lifecycle)
+    Assert.assertTrue(syncListenerManager.onSyncListeners.isNotEmpty())
+    Assert.assertEquals(1, syncListenerManager.onSyncListeners.size)
+    Assert.assertTrue(syncListenerManager.onSyncListeners.first() is HiltActivityForTest)
+  }
+
+  @Test
+  fun testRegisterSyncListenerShouldIgnoreDuplicateOnSyncListener() {
+    activityController.create().resume()
+    syncListenerManager.registerSyncListener(hiltActivityForTest, hiltActivityForTest.lifecycle)
+    syncListenerManager.registerSyncListener(hiltActivityForTest, hiltActivityForTest.lifecycle)
+    Assert.assertEquals(1, syncListenerManager.onSyncListeners.size)
+  }
+
+  @Test
+  fun testSyncListenerManagerShouldRemoveListenerWhenLifecycleIsDestroyed() {
+    activityController.create().resume()
+    syncListenerManager.registerSyncListener(hiltActivityForTest, hiltActivityForTest.lifecycle)
+    activityController.destroy()
+    Assert.assertTrue(syncListenerManager.onSyncListeners.isEmpty())
+  }
+
+  @Test
+  fun testThatCallingDeregisterListenerRemovesOnSyncListener() {
+    activityController.create().resume()
+    syncListenerManager.run {
+      registerSyncListener(hiltActivityForTest, hiltActivityForTest.lifecycle)
+      deregisterSyncListener(hiltActivityForTest)
+    }
+    Assert.assertTrue(syncListenerManager.onSyncListeners.isEmpty())
+  }
+}

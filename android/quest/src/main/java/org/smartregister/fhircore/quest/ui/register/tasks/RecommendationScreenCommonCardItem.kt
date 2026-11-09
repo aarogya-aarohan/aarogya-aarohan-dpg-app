@@ -1,0 +1,412 @@
+package org.smartregister.fhircore.quest.ui.register.tasks
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.MaterialTheme
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import org.hl7.fhir.r4.model.Task
+import org.smartregister.fhircore.engine.util.extension.valueToString
+import org.smartregister.fhircore.quest.R
+import org.smartregister.fhircore.quest.theme.Colors
+import org.smartregister.fhircore.quest.theme.Colors.BRANDEIS_BLUE
+import org.smartregister.fhircore.quest.theme.Colors.CRAYOLA_LIGHT
+import org.smartregister.fhircore.quest.theme.body12Medium
+import org.smartregister.fhircore.quest.theme.body14Medium
+import org.smartregister.fhircore.quest.theme.body18Medium
+import org.smartregister.fhircore.quest.theme.bodyExtraBold
+import org.smartregister.fhircore.quest.theme.bodyNormal
+import org.smartregister.fhircore.quest.ui.register.patients.RegisterViewModel
+import org.smartregister.fhircore.quest.util.SectionTitles
+import org.smartregister.fhircore.quest.util.TaskProgressState
+
+/**
+ * Created by Jeetesh Surana.
+ */
+
+@Composable
+fun CardItemViewAllTask(
+    viewModel: TasksViewModel,
+    task: TasksViewModel.TaskItem,
+    onSelectTask: (TasksViewModel.TaskItem) -> Unit
+) {
+    val name = task.patient?.name
+        ?.firstOrNull()
+        ?.given
+        ?.firstOrNull()
+        ?.value
+        ?: ""
+
+    val phone = task.patient?.telecom
+        ?.firstOrNull()
+        ?.value
+        ?: ""
+    val taskStatusList = viewModel.getTaskCodeWithValue(task)
+    println("CardItemView getTaskStatusList--> $taskStatusList")
+    val reason = task.task.output.takeIf { it.isNotEmpty() }
+        ?.get(0)?.value.valueToString()
+    RecommendationItem(name, phone, reason, task.task.status, taskStatusList) {
+        onSelectTask(task)
+    }
+}
+
+
+@Composable
+fun RecommendationItem(
+    name: String,
+    phone: String,
+    taskReason: String,
+    taskStatus : Task.TaskStatus,
+    taskStatusList: List<Pair<String, String>>?,
+    trailingContent: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    var displayReason = ""
+    when (taskReason) {
+
+        TaskProgressState.NOT_RESPONDED.name -> {
+            displayReason = SectionTitles.NOT_RESPONDED
+        }
+        TaskProgressState.NOT_CONTACTED.name -> {
+            displayReason = SectionTitles.NOT_CONTACTED
+        }
+        TaskProgressState.AGREED_FOLLOWUP_NOT_DONE.name -> {
+            displayReason = SectionTitles.AGREED_FOLLOWUP_NOT_DONE
+        }
+        TaskProgressState.NOT_AGREED_FOR_FOLLOWUP.name -> {
+            displayReason = SectionTitles.NOT_AGREED_FOR_FOLLOWUP
+        }
+    }
+
+    Card(
+        onClick = onClick,
+        shape = RoundedCornerShape(4.dp),
+        colors = CardDefaults.cardColors().copy(Color.White, Color.White, Color.White, Color.White),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .background(Color.White)
+        ) {
+            Row {
+                Image(
+                    painter = painterResource(id = R.drawable.ic_patient_male),
+                    contentDescription = org.smartregister.fhircore.quest.ui.main.components.FILTER
+                )
+                Column(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    // Laid out beside the status so long names wrap instead of running under it
+                    Row(verticalAlignment = Alignment.Top) {
+                        Text(
+                            text = name,
+                            style = body18Medium(),
+                            color = BRANDEIS_BLUE,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (trailingContent != null) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            trailingContent()
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.Center) {
+                        Text(
+                            text = stringResource(id =  R.string.phone),
+                            style = bodyExtraBold(14.sp),
+                            color = CRAYOLA_LIGHT
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = phone,
+                            style = bodyNormal(14.sp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    //MultiRecommendationStatus(taskStatusList)
+                    SingleHighestPriorityRecommendationStatus(taskStatusList)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (taskStatus == Task.TaskStatus.COMPLETED && displayReason.isNotEmpty()) {
+                        Row(horizontalArrangement = Arrangement.Center) {
+                            Text(
+                                text = "Reason: $displayReason",
+                                style = bodyNormal(10.sp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SingleHighestPriorityRecommendationStatus(taskStatusList: List<Pair<String, String>>?) {
+    // Define priority order: lower index = higher priority
+    val priorityOrder = listOf(
+        TaskCode.URGENT_REFER_TO_HOSPITAL,
+        TaskCode.ADDITIONAL_INVESTIGATION_NEEDED,
+        TaskCode.RETAKE_IMAGE,
+        TaskCode.QUIT_HABIT
+    )
+
+    // Find the highest priority item
+    val prioritizedItem = taskStatusList
+        ?.mapNotNull { data ->
+            val code = TaskCode.fromCode(data.first) ?: TaskCode.fromCode(data.second)
+            if (code != null) code to data else null
+        }?.minByOrNull {
+            priorityOrder.indexOf(it.first).takeIf { idx -> idx >= 0 } ?: Int.MAX_VALUE
+        }
+
+    prioritizedItem?.let { (taskCode, data) ->
+        val label = taskCode.localizedLabel().uppercase()
+        var textColor = Color.Black
+        var color = Color.Black
+
+        when (taskCode) {
+            TaskCode.ADDITIONAL_INVESTIGATION_NEEDED -> {
+                color = Colors.CORNSILK
+                textColor = Colors.PHILIPPINE_YELLOW
+            }
+            TaskCode.QUIT_HABIT -> {
+                color = Colors.LAVENDER_WEB
+                textColor = Colors.DEEP_LILAC
+            }
+            TaskCode.URGENT_REFER_TO_HOSPITAL -> {
+                color = Colors.LIGHT_RED
+                textColor = Colors.SIZZLING_RED
+            }
+            TaskCode.RETAKE_IMAGE -> {
+                color = Color.LightGray
+                textColor = Color.Gray
+            }
+            else -> {
+                color = Color.LightGray
+                textColor = Color.Gray
+            }
+        }
+
+        Text(
+            text = label,
+            color = textColor,
+            style = body12Medium(),
+            modifier = Modifier
+                .background(color, shape = MaterialTheme.shapes.small)
+                .padding(horizontal = 8.dp, vertical = 8.dp)
+        )
+    }
+}
+
+@Composable
+fun MultiRecommendationStatus(taskStatusList: List<Pair<String, String>>?) {
+    val lazyListState = rememberLazyListState()
+    LazyRow(
+        state = lazyListState,
+        contentPadding = PaddingValues(start = 8.dp, top = 8.dp, bottom = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Colors.ANTI_FLASH_WHITE, shape = RoundedCornerShape(4.dp))
+    ) {
+        items(count = taskStatusList?.size ?: 0) { position ->
+            val data = taskStatusList?.get(position)
+            Row(modifier = Modifier.padding(end = 8.dp)) {
+                val taskCode = TaskCode.fromCode(data?.first ?: "") ?: TaskCode.fromCode(data?.second ?: "")
+                val label = taskCode?.localizedLabel()?.uppercase() ?: (data?.second?.uppercase() ?: "")
+                var textColor = Color.Black
+                var color = Color.Black
+
+                when (taskCode) {
+                    TaskCode.ADDITIONAL_INVESTIGATION_NEEDED -> {
+                        color = Colors.CORNSILK
+                        textColor = Colors.PHILIPPINE_YELLOW
+                    }
+
+                    TaskCode.QUIT_HABIT -> {
+                        color = Colors.LAVENDER_WEB
+                        textColor = Colors.DEEP_LILAC
+                    }
+
+                    TaskCode.URGENT_REFER_TO_HOSPITAL -> {
+                        color = Colors.LIGHT_RED
+                        textColor = Colors.SIZZLING_RED
+                    }
+
+                    TaskCode.RETAKE_IMAGE -> {
+                        color = Color.LightGray
+                        textColor = Color.Gray
+                    }
+
+                    else -> {
+                        color = Color.LightGray
+                        textColor = Color.Gray
+                    }
+                }
+
+                Text(
+                    text = label.uppercase(),
+                    color = textColor,
+                    style = body14Medium(),
+                    modifier = Modifier
+                        .background(
+                            color, shape = MaterialTheme.shapes.small
+                        )
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun SingleRecommendationStatusColumn(taskStatusList: List<Pair<String, String>>?) {
+    val lazyListState = rememberLazyListState()
+    val priorityOrder = listOf(
+        TaskCode.URGENT_REFER_TO_HOSPITAL,
+        TaskCode.ADDITIONAL_INVESTIGATION_NEEDED,
+        TaskCode.RETAKE_IMAGE,
+        TaskCode.QUIT_HABIT
+    )
+
+    val prioritizedItem = taskStatusList
+        ?.mapNotNull { data ->
+            val code = TaskCode.fromCode(data.first) ?: TaskCode.fromCode(data.second)
+            if (code != null) code to data
+            else null
+        }?.minByOrNull {
+            priorityOrder.indexOf(it.first).takeIf { idx -> idx >= 0 } ?: Int.MAX_VALUE
+        }
+
+    prioritizedItem?.let { (taskCode, data) ->
+        LazyColumn(
+            state = lazyListState,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            item {
+                Row(modifier = Modifier.padding(bottom = 16.dp)) {
+                    val label = taskCode.localizedLabel().uppercase()
+                    var textColor = Color.Black
+                    var color = Color.Black
+
+                    when (taskCode) {
+                        TaskCode.ADDITIONAL_INVESTIGATION_NEEDED -> {
+                            color = Colors.CORNSILK
+                            textColor = Colors.PHILIPPINE_YELLOW
+                        }
+                        TaskCode.QUIT_HABIT -> {
+                            color = Colors.LAVENDER_WEB
+                            textColor = Colors.DEEP_LILAC
+                        }
+                        TaskCode.URGENT_REFER_TO_HOSPITAL -> {
+                            color = Colors.LIGHT_RED
+                            textColor = Colors.SIZZLING_RED
+                        }
+                        TaskCode.RETAKE_IMAGE -> {
+                            color = Color.LightGray
+                            textColor = Color.Gray
+                        }
+                        else -> {
+                            color = Color.LightGray
+                            textColor = Color.Gray
+                        }
+                    }
+
+                    Text(
+                        text = label,
+                        color = textColor,
+                        style = body12Medium(),
+                        modifier = Modifier
+                            .background(
+                                color, shape = MaterialTheme.shapes.small
+                            ).fillMaxWidth()
+                            .padding(12.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MultiRecommendationStatusColumn(taskStatusList: List<Pair<String, String>>?) {
+    val lazyListState = rememberLazyListState()
+    taskStatusList?.size?.let {
+        LazyColumn(
+            state = lazyListState,
+            modifier = if (it > 1)  Modifier.fillMaxWidth().height(150.dp) else Modifier.fillMaxWidth()
+        ) {
+            items(count = taskStatusList?.size ?: 0) { position ->
+                val data = taskStatusList?.get(position)
+                Row(modifier = Modifier.padding(bottom = 16.dp)) {
+                    val taskCode = TaskCode.fromCode(data?.first ?: "") ?: TaskCode.fromCode(data?.second ?: "")
+                    val label = taskCode?.localizedLabel()?.uppercase() ?: (data?.second?.uppercase() ?: "")
+                    var textColor = Color.Black
+                    var color = Color.Black
+
+                    when (taskCode) {
+                        TaskCode.ADDITIONAL_INVESTIGATION_NEEDED -> {
+                            color = Colors.CORNSILK
+                            textColor = Colors.PHILIPPINE_YELLOW
+                        }
+
+                        TaskCode.QUIT_HABIT -> {
+                            color = Colors.LAVENDER_WEB
+                            textColor = Colors.DEEP_LILAC
+                        }
+
+                        TaskCode.URGENT_REFER_TO_HOSPITAL -> {
+                            color = Colors.LIGHT_RED
+                            textColor = Colors.SIZZLING_RED
+                        }
+
+                        TaskCode.RETAKE_IMAGE -> {
+                            color = Color.LightGray
+                            textColor = Color.Gray
+                        }
+
+                        else -> {
+                            color = Color.LightGray
+                            textColor = Color.Gray
+                        }
+                    }
+
+                    Text(
+                        text = label.uppercase(),
+                        color = textColor,
+                        style = body14Medium(),
+                        modifier = Modifier
+                            .background(
+                                color, shape = MaterialTheme.shapes.small
+                            ).fillMaxWidth()
+                            .padding(12.dp)
+                    )
+                }
+            }
+        }
+    }
+}

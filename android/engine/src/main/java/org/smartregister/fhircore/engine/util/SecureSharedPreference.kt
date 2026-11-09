@@ -1,0 +1,240 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.engine.util
+
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.core.content.edit
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import dagger.hilt.android.qualifiers.ApplicationContext
+import org.jetbrains.annotations.VisibleForTesting
+import org.smartregister.fhircore.engine.auth.AuthCredentials
+import org.smartregister.fhircore.engine.util.extension.decodeJson
+import org.smartregister.fhircore.engine.util.extension.encodeJson
+import timber.log.Timber
+import java.security.KeyStore
+import java.util.Base64
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class SecureSharedPreference @Inject constructor(@ApplicationContext val context: Context) {
+
+  private val secureSharedPreferences: SharedPreferences = openSecureStorage()
+
+  private fun getMasterKey() =
+    MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+
+  private fun buildEncryptedPreferences(): SharedPreferences =
+    EncryptedSharedPreferences.create(
+      context,
+      SECURE_STORAGE_FILE_NAME,
+      getMasterKey(),
+      EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+      EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
+
+  /**
+   * Opens the encrypted store, recovering from an unreadable keyset instead of crashing on launch.
+   *
+   * The keyset that protects this file is wrapped by a key held in the Android Keystore. If the
+   * keyset and that key fall out of sync — most commonly when Auto Backup restores this file onto a
+   * device whose Keystore does not hold the matching key — Tink throws `AEADBadTagException`
+   * ("Signature/MAC verification failed") while decrypting the keyset. This class is created during
+   * `QuestApplication.onCreate`, so an unhandled failure here kills the process on every launch and
+   * the only recovery a user has is clearing app data.
+   *
+   * On failure we drop the unreadable keyset and encrypted values (they cannot be decrypted anyway)
+   * and rebuild. The keyset lives inside this same prefs file, so deleting it lets a fresh keyset be
+   * generated and wrapped by the device's current Keystore key. The user loses their saved session
+   * and logs in again — the same outcome as clearing data, but the app opens instead of crash-looping.
+   */
+  private fun openSecureStorage(): SharedPreferences =
+    try {
+      buildEncryptedPreferences()
+    } catch (firstFailure: Exception) {
+      Timber.e(firstFailure, "Secure storage unreadable; resetting keyset and rebuilding")
+      resetSecureStorageFile()
+      try {
+        buildEncryptedPreferences()
+      } catch (secondFailure: Exception) {
+        // The Keystore master key itself may be unusable, not just mismatched. Drop it and the
+        // keyset so a brand-new key + keyset pair is generated. SecureSharedPreference is the only
+        // consumer of this master key alias, so removing it affects nothing else.
+        Timber.e(secondFailure, "Secure storage still unreadable; clearing Keystore master key")
+        deleteMasterKeyEntry()
+        resetSecureStorageFile()
+        buildEncryptedPreferences()
+      }
+    }
+
+  private fun resetSecureStorageFile() {
+    runCatching { context.deleteSharedPreferences(SECURE_STORAGE_FILE_NAME) }
+      .onFailure { Timber.e(it, "Could not delete corrupted secure prefs file") }
+  }
+
+  private fun deleteMasterKeyEntry() {
+    runCatching {
+      KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.run {
+        if (containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
+          deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+        }
+      }
+    }
+      .onFailure { Timber.e(it, "Could not delete Keystore master key entry") }
+  }
+
+  fun saveCredentials(username: String, password: CharArray) {
+    val randomSaltBytes = get256RandomBytes()
+
+    secureSharedPreferences.edit {
+      putString(
+        SharedPreferenceKey.LOGIN_CREDENTIAL_KEY.name,
+        AuthCredentials(
+            username = username,
+            salt = Base64.getEncoder().encodeToString(randomSaltBytes),
+            passwordHash = password.toPasswordHash(randomSaltBytes),
+          )
+          .encodeJson(),
+      )
+    }
+    clearPasswordInMemory(password)
+  }
+
+  fun deleteCredentials() =
+    secureSharedPreferences.edit { remove(SharedPreferenceKey.LOGIN_CREDENTIAL_KEY.name) }
+
+  fun retrieveSessionUsername() = retrieveCredentials()?.username
+
+  fun retrieveCredentials(): AuthCredentials? =
+    secureSharedPreferences
+      .getString(SharedPreferenceKey.LOGIN_CREDENTIAL_KEY.name, null)
+      ?.decodeJson<AuthCredentials>()
+
+
+  fun getPractitionerUserId(): String =
+    secureSharedPreferences
+      .getString(SharedPreferenceKey.PRACTITIONER_USER_ID.name, null) ?: ""
+
+
+  fun savePractitionerUserId(logicalId: String) {
+    secureSharedPreferences.edit {
+      putString(SharedPreferenceKey.PRACTITIONER_USER_ID.name, logicalId)
+    }
+  }
+
+  fun updateLastSyncDataTime(timeInMillis: Long) {
+    secureSharedPreferences.edit {
+      putLong(SharedPreferenceKey.LAST_SYNC_DATE_TIME.name, timeInMillis)
+    }
+  }
+
+  fun getLastSyncDataTime(): Long {
+    return secureSharedPreferences
+      .getLong(SharedPreferenceKey.LAST_SYNC_DATE_TIME.name, -1L)
+  }
+
+  fun practitionerIdIssueMigrated(isMigrated: Boolean) {
+    secureSharedPreferences.edit {
+      putBoolean(SharedPreferenceKey.PRACTITIONER_USER_ID_ISSUE_FIXED.name, isMigrated)
+    }
+  }
+
+  fun getPractitionerIdIssueMigrated(): Boolean =
+    secureSharedPreferences
+      .getBoolean(SharedPreferenceKey.PRACTITIONER_USER_ID_ISSUE_FIXED.name, false)
+
+
+  fun saveSessionPin(pin: CharArray) {
+    val randomSaltBytes = get256RandomBytes()
+    secureSharedPreferences.edit {
+      putString(
+        SharedPreferenceKey.LOGIN_PIN_SALT.name,
+        Base64.getEncoder().encodeToString(randomSaltBytes),
+      )
+      putString(SharedPreferenceKey.LOGIN_PIN_KEY.name, pin.toPasswordHash(randomSaltBytes))
+    }
+  }
+  fun saveUrls(fhirBaseUrl: String?, oauthBaseUrl: String?) {
+    secureSharedPreferences.edit {
+      putString(SharedPreferenceKey.FHIR_BASE_URL.name, fhirBaseUrl)
+      putString(SharedPreferenceKey.OAUTH_BASE_URL.name, oauthBaseUrl)
+    }
+  }
+
+  fun saveSiteName(siteName: String?) {
+    secureSharedPreferences.edit {
+      putString(SharedPreferenceKey.SITE_NAME.name, siteName)
+    }
+  }
+
+  fun setChangeLanguage(language: String,languageCode: String) {
+    secureSharedPreferences.edit {
+      putString(SharedPreferenceKey.KEY_LANGUAGE.name, language)
+      putString(SharedPreferenceKey.KEY_LANGUAGE_CODE.name, languageCode)
+    }
+  }
+
+  fun getFhirBaseUrl(): String {
+    return secureSharedPreferences.getString(SharedPreferenceKey.FHIR_BASE_URL.name, null).orEmpty()
+  }
+
+  fun getOauthBaseUrl(): String {
+    return secureSharedPreferences.getString(SharedPreferenceKey.OAUTH_BASE_URL.name, null).orEmpty()
+  }
+
+  @VisibleForTesting fun get256RandomBytes() = 256.getRandomBytesOfSize()
+
+  fun retrievePinSalt() =
+    secureSharedPreferences.getString(SharedPreferenceKey.LOGIN_PIN_SALT.name, null)
+
+  fun retrieveSessionPin() =
+    secureSharedPreferences.getString(SharedPreferenceKey.LOGIN_PIN_KEY.name, null)
+
+  fun deleteSessionPin() =
+    secureSharedPreferences.edit { remove(SharedPreferenceKey.LOGIN_PIN_KEY.name) }
+
+  fun setUserSwitchAllowed(allowed: Boolean) =
+    secureSharedPreferences.edit {
+      putBoolean(SharedPreferenceKey.USER_SWITCH_ALLOWED.name, allowed)
+    }
+
+  fun isUserSwitchAllowed(): Boolean =
+    secureSharedPreferences.getBoolean(SharedPreferenceKey.USER_SWITCH_ALLOWED.name, false)
+
+  /**
+   * Drops what belongs to the previous user's session: PIN, practitioner id and last-sync time.
+   * The login credentials stay, because by the time this runs they are already the new user's.
+   */
+  fun clearPreviousUserSession() =
+    secureSharedPreferences.edit {
+      remove(SharedPreferenceKey.LOGIN_PIN_KEY.name)
+      remove(SharedPreferenceKey.LOGIN_PIN_SALT.name)
+      remove(SharedPreferenceKey.PRACTITIONER_USER_ID.name)
+      remove(SharedPreferenceKey.LAST_SYNC_DATE_TIME.name)
+      remove(SharedPreferenceKey.USER_SWITCH_ALLOWED.name)
+    }
+
+  /** This method resets/clears all existing values in the shared preferences synchronously */
+  fun resetSharedPrefs() = secureSharedPreferences.edit { clear() }
+
+  companion object {
+    const val SECURE_STORAGE_FILE_NAME = "fhircore_secure_preferences"
+    private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+  }
+}

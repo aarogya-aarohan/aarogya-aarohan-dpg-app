@@ -1,0 +1,1808 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.questionnaire
+
+import android.content.Context
+import android.widget.Toast
+import androidx.annotation.VisibleForTesting
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import ca.uhn.fhir.context.FhirContext
+import com.google.android.fhir.FhirEngine
+import com.google.android.fhir.datacapture.mapping.ResourceMapper
+import com.google.android.fhir.datacapture.mapping.StructureMapExtractionContext
+import com.google.android.fhir.datacapture.validation.NotValidated
+import com.google.android.fhir.datacapture.validation.QuestionnaireResponseValidator
+import com.google.android.fhir.datacapture.validation.Valid
+import com.google.android.fhir.db.ResourceNotFoundException
+import com.google.android.fhir.search.Search
+import com.google.android.fhir.search.filter.TokenParamFilterCriterion
+import com.google.android.fhir.search.search
+import com.google.android.fhir.workflow.FhirOperator
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.hl7.fhir.r4.context.IWorkerContext
+import org.hl7.fhir.r4.model.Attachment
+import org.hl7.fhir.r4.model.Base
+import org.hl7.fhir.r4.model.Basic
+import org.hl7.fhir.r4.model.Bundle
+import org.hl7.fhir.r4.model.Coding
+import org.hl7.fhir.r4.model.DocumentReference
+import org.hl7.fhir.r4.model.Group
+import org.hl7.fhir.r4.model.IdType
+import org.hl7.fhir.r4.model.Identifier
+import org.hl7.fhir.r4.model.Library
+import org.hl7.fhir.r4.model.ListResource
+import org.hl7.fhir.r4.model.ListResource.ListEntryComponent
+import org.hl7.fhir.r4.model.Parameters
+import org.hl7.fhir.r4.model.Patient
+import org.hl7.fhir.r4.model.Questionnaire
+import org.hl7.fhir.r4.model.QuestionnaireResponse
+import org.hl7.fhir.r4.model.Reference
+import org.hl7.fhir.r4.model.RelatedPerson
+import org.hl7.fhir.r4.model.Resource
+import org.hl7.fhir.r4.model.ResourceType
+import org.hl7.fhir.r4.model.StringType
+import org.smartregister.fhircore.engine.BuildConfig
+import org.smartregister.fhircore.engine.configuration.ConfigType
+import org.smartregister.fhircore.engine.configuration.ConfigurationRegistry
+import org.smartregister.fhircore.engine.configuration.GroupResourceConfig
+import org.smartregister.fhircore.engine.configuration.LinkIdType
+import org.smartregister.fhircore.engine.configuration.QuestionnaireConfig
+import org.smartregister.fhircore.engine.configuration.app.ApplicationConfiguration
+import org.smartregister.fhircore.engine.data.local.DefaultRepository
+import org.smartregister.fhircore.engine.domain.model.ActionParameter
+import org.smartregister.fhircore.engine.domain.model.ActionParameterType
+import org.smartregister.fhircore.engine.domain.model.isEditable
+import org.smartregister.fhircore.engine.domain.model.isReadOnly
+import org.smartregister.fhircore.engine.rulesengine.ResourceDataRulesExecutor
+import org.smartregister.fhircore.engine.sync.SyncBroadcaster
+import org.smartregister.fhircore.engine.task.FhirCarePlanGenerator
+import org.smartregister.fhircore.engine.util.CanonicalUrls
+import org.smartregister.fhircore.engine.util.DispatcherProvider
+import org.smartregister.fhircore.engine.util.SecureSharedPreference
+import org.smartregister.fhircore.engine.util.SharedPreferenceKey
+import org.smartregister.fhircore.engine.util.SharedPreferencesHelper
+import org.smartregister.fhircore.engine.util.extension.DEFAULT_PLACEHOLDER_PREFIX
+import org.smartregister.fhircore.engine.util.extension.appendOrganizationInfo
+import org.smartregister.fhircore.engine.util.extension.appendPractitionerInfo
+import org.smartregister.fhircore.engine.util.extension.appendRelatedEntityLocation
+import org.smartregister.fhircore.engine.util.extension.asReference
+import org.smartregister.fhircore.engine.util.extension.cqfLibraryUrls
+import org.smartregister.fhircore.engine.util.extension.extractByStructureMap
+import org.smartregister.fhircore.engine.util.extension.extractId
+import org.smartregister.fhircore.engine.util.extension.extractLogicalIdUuid
+import org.smartregister.fhircore.engine.util.extension.find
+import org.smartregister.fhircore.engine.util.extension.generateMissingId
+import org.smartregister.fhircore.engine.util.extension.isIn
+import org.smartregister.fhircore.engine.util.extension.logicalId
+import org.smartregister.fhircore.engine.util.extension.prePopulateInitialValues
+import org.smartregister.fhircore.engine.util.extension.prepareQuestionsForReadingOrEditing
+import org.smartregister.fhircore.engine.util.extension.showToast
+import org.smartregister.fhircore.engine.util.extension.updateLastUpdated
+import org.smartregister.fhircore.engine.util.fhirpath.FhirPathDataExtractor
+import org.smartregister.fhircore.engine.util.helper.TransformSupportServices
+import org.smartregister.fhircore.quest.R
+
+import org.smartregister.fhircore.quest.ai.AiInferenceSummary
+import org.smartregister.fhircore.quest.ai.AiResultFhirMapper
+import org.smartregister.fhircore.quest.ai.CaseAggregator
+import org.smartregister.fhircore.quest.ml.ImageScreeningResult
+import org.smartregister.fhircore.quest.util.AI_RESULT_SUFFIX
+import org.smartregister.fhircore.quest.util.DraftsUtils.getAllDraftsJsonFromSharedPreferences
+import org.smartregister.fhircore.quest.util.DraftsUtils.parseDraftResponses
+import org.smartregister.fhircore.quest.util.REFER_CASE_URL
+import org.smartregister.fhircore.quest.util.languageExtensionToActionParameters
+import org.smartregister.fhircore.engine.util.UploadedDocumentReferenceLedger
+import org.smartregister.fhircore.quest.ui.register.patients.DocumentReferenceCaseType
+import org.hl7.fhir.r4.model.BooleanType
+import timber.log.Timber
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import javax.inject.Inject
+
+@HiltViewModel
+class QuestionnaireViewModel
+@Inject
+constructor(
+  val defaultRepository: DefaultRepository,
+  val dispatcherProvider: DispatcherProvider,
+  val fhirCarePlanGenerator: FhirCarePlanGenerator,
+  val resourceDataRulesExecutor: ResourceDataRulesExecutor,
+  val transformSupportServices: TransformSupportServices,
+  val sharedPreferencesHelper: SharedPreferencesHelper,
+  val secureSharedPreference: SecureSharedPreference,
+  val fhirOperator: FhirOperator,
+  val fhirPathDataExtractor: FhirPathDataExtractor,
+  val configurationRegistry: ConfigurationRegistry,
+  val syncBroadcaster: SyncBroadcaster,
+  val fhirEngine: FhirEngine,
+  val uploadedDocumentReferenceLedger: UploadedDocumentReferenceLedger,
+) : ViewModel() {
+  private val parser = FhirContext.forR4Cached().newJsonParser()
+
+  private val authenticatedOrganizationIds by lazy {
+    sharedPreferencesHelper.read<List<String>>(ResourceType.Organization.name)
+  }
+
+  private val practitionerId: String? by lazy {
+    sharedPreferencesHelper
+      .read(SharedPreferenceKey.PRACTITIONER_ID.name, null)
+      ?.extractLogicalIdUuid()
+  }
+
+  val languageCode: String by lazy {
+    sharedPreferencesHelper.read(SharedPreferenceKey.KEY_LANGUAGE_CODE.name, Locale.ENGLISH.toLanguageTag()) ?: Locale.ENGLISH.toLanguageTag()
+  }
+
+  private val _questionnaireProgressStateLiveData = MutableLiveData<QuestionnaireProgressState?>()
+  val questionnaireProgressStateLiveData: LiveData<QuestionnaireProgressState?>
+    get() = _questionnaireProgressStateLiveData
+
+  val applicationConfiguration: ApplicationConfiguration by lazy {
+    configurationRegistry.retrieveConfiguration(ConfigType.Application)
+  }
+
+  private val _isDraftSaved = MutableLiveData<Boolean>(false)
+
+  val isDraftSaved: LiveData<Boolean>
+    get() = _isDraftSaved
+
+  /** The mutually exclusive ways a questionnaire session can end. */
+  enum class SessionOutcome {
+    NONE,
+    SUBMITTING,
+    SAVING_DRAFT,
+  }
+
+  /**
+   * A questionnaire session must end in exactly one way — the case is submitted, or a draft is
+   * saved. This single CAS-guarded latch is shared by both terminal paths so they can never both
+   * run, which guards two races seen in the field:
+   * - double-tapping submit, where each tap re-ran extraction and saved a brand new Patient, or
+   *   re-submitting an already-saved form, e.g. after navigating back from the AI result screen;
+   * - pressing back while a submission is in flight, which saved a draft *alongside* the submitted
+   *   case. Reopening that draft and submitting it registered the case a second time with its
+   *   screening images missing, because the first submission had already flipped those
+   *   DocumentReferences to SUBMITTED and the sync worker had since purged them locally — so
+   *   [reconcileDocumentReferencesForSubmission] dropped the now-dangling answers.
+   *
+   * Only reset when a submission fails before any resource is saved, so the user can retry.
+   */
+  private val sessionOutcome = AtomicReference(SessionOutcome.NONE)
+
+  /** Returns true if the caller acquired the (single) submission slot for this session. */
+  fun tryStartSubmission(): Boolean =
+    sessionOutcome.compareAndSet(SessionOutcome.NONE, SessionOutcome.SUBMITTING)
+
+  /** Returns true if the caller acquired the (single) draft-save slot for this session. */
+  fun tryStartDraftSave(): Boolean =
+    sessionOutcome.compareAndSet(SessionOutcome.NONE, SessionOutcome.SAVING_DRAFT)
+
+  /**
+   * True while a submission owns this session. The back button must refuse to save a draft for as
+   * long as this holds, otherwise the case and a draft of the same data both end up on the device.
+   */
+  fun isSubmissionInFlight(): Boolean = sessionOutcome.get() == SessionOutcome.SUBMITTING
+
+  private fun allowSubmissionRetry() {
+    sessionOutcome.set(SessionOutcome.NONE)
+  }
+
+  /**
+   * User-facing aa-reference-id for the case registered in this questionnaire session. Generated
+   * once per session so a retried or accidentally repeated submission reuses the same id instead
+   * of minting a new one for every attempt.
+   */
+  private val sessionReferenceId: String by lazy {
+    (10_000_000..99_999_999).random().toString()
+  }
+
+  fun getUserName(): String {
+    return secureSharedPreference.getPractitionerUserId()
+  }
+
+  /**
+   * This function retrieves the [Questionnaire] as configured via the [QuestionnaireConfig]. The
+   * retrieved [Questionnaire] can be pre-populated with computed values from the Rules engine.
+   */
+  suspend fun retrieveQuestionnaire(
+    questionnaireConfig: QuestionnaireConfig,
+    actionParameters: List<ActionParameter>?,
+    languageCode: String
+  ): Questionnaire? {
+    if (questionnaireConfig.id.isEmpty() || questionnaireConfig.id.isBlank()) return null
+
+    // Compute questionnaire config rules and add extra questionnaire params to action parameters
+    val questionnaireComputedValues =
+      questionnaireConfig.configRules?.let {
+        resourceDataRulesExecutor.computeResourceDataRules(it, null, emptyMap())
+      } ?: emptyMap()
+
+    var allActionParameters =
+      actionParameters?.plus(
+        questionnaireConfig.extraParams?.map { it.interpolate(questionnaireComputedValues) }
+          ?: emptyList(),
+      )
+
+
+    if (questionnaireConfig.extraParams.isNullOrEmpty() && allActionParameters.isNullOrEmpty()){
+      allActionParameters = languageExtensionToActionParameters(languageCode)
+      questionnaireConfig.extraParams = allActionParameters
+    }
+
+
+    val questionnaire =
+      defaultRepository.loadResource<Questionnaire>(questionnaireConfig.id)?.apply {
+        if (questionnaireConfig.isReadOnly() || questionnaireConfig.isEditable()) {
+          item.prepareQuestionsForReadingOrEditing(
+            readOnly = questionnaireConfig.isReadOnly(),
+            readOnlyLinkIds =
+              questionnaireConfig.readOnlyLinkIds
+                ?: questionnaireConfig.linkIds
+                  ?.filter { it.type == LinkIdType.READ_ONLY }
+                  ?.map { it.linkId },
+          )
+        }
+
+        // Pre-populate questionnaire items with configured values
+        allActionParameters
+          ?.filter { (it.paramType == ActionParameterType.PREPOPULATE && it.value.isNotEmpty()) }
+          ?.let { actionParam ->
+            item.prePopulateInitialValues(DEFAULT_PLACEHOLDER_PREFIX, actionParam)
+          }
+
+        // Set barcode to the configured linkId default: "patient-barcode"
+        if (!questionnaireConfig.resourceIdentifier.isNullOrEmpty()) {
+          (questionnaireConfig.barcodeLinkId
+            ?: questionnaireConfig.linkIds?.firstOrNull { it.type == LinkIdType.BARCODE }?.linkId)
+            ?.let { barcodeLinkId ->
+              find(barcodeLinkId)?.apply {
+                initial =
+                  mutableListOf(
+                    Questionnaire.QuestionnaireItemInitialComponent()
+                      .setValue(StringType(questionnaireConfig.resourceIdentifier)),
+                  ) // TODO should this be resource identifier or OpenSrp unique ID?
+                readOnly = true
+              }
+            }
+        }
+      }
+    return questionnaire
+  }
+
+  /**
+   * Reconciles the DocumentReferences referenced by the screening-image answers of
+   * [questionnaireResponse] against the local [FhirEngine], mutating the response in place
+   * immediately before submission. Extracted from `QuestionnaireActivity.registerFragmentResultListener`
+   * so this logic — the guard against the DocumentReference 404 — is unit testable.
+   *
+   * For every screening image answer that carries an attachment URL:
+   * - a DRAFT DocumentReference is flipped to SUBMITTED (so the sync worker uploads it), or
+   * - if the DocumentReference is missing locally (the precondition for the server-side 404) the
+   *   dangling answer is dropped, so the uploaded QuestionnaireResponse never references a resource
+   *   the server never received.
+   *
+   * Items whose linkId ends with [AI_RESULT_SUFFIX] and answers without an attachment are ignored.
+   * Any non-[ResourceNotFoundException] failure while fetching leaves the answer untouched (matching
+   * the previous behaviour). Missing-reference analytics are intentionally left to the caller — via
+   * the returned [DocumentReferenceReconciliationResult] — so this function has no UI/analytics side
+   * effects and stays testable.
+   */
+  suspend fun reconcileDocumentReferencesForSubmission(
+    questionnaireResponse: QuestionnaireResponse,
+  ): DocumentReferenceReconciliationResult {
+    val submittedDraftIds = mutableListOf<String>()
+    val missingReferences = mutableListOf<MissingDocumentReference>()
+    val unparseableUrls = mutableListOf<String>()
+    val uploadedButPurgedIds = mutableListOf<String>()
+    val failedFlips = mutableListOf<MissingDocumentReference>()
+
+    Timber.d("=== Starting DocumentReference update processing ===")
+    questionnaireResponse.item
+      .filter { it.linkId == SCREENING_GROUP_LINK_ID }
+      .forEach { screeningGroup ->
+        screeningGroup.item
+          .filter { it.linkId == PATIENT_SCREENING_IMAGE_GROUP_LINK_ID }
+          .forEach { imageGroup ->
+            imageGroup.item.forEach { image ->
+              // AI-result items carry no attachment; never reconcile them.
+              if (image.linkId.endsWith(AI_RESULT_SUFFIX)) return@forEach
+              // Iterate over a copy so a dangling answer can be removed in-loop.
+              image.answer.toList().forEach answerLoop@{ answer ->
+                // Screening-image answers always carry an Attachment; guard so a non-attachment
+                // answer is skipped rather than throwing from HAPI's getValueAttachment().
+                if (!answer.hasValueAttachment()) return@answerLoop
+                val attachment = answer.valueAttachment
+                val documentReferenceId = extractDocumentReferenceIdFromUrl(attachment.url)
+                if (documentReferenceId == null) {
+                  Timber.w("Could not extract DocumentReference ID from URL: ${attachment.url}")
+                  attachment.url?.let { unparseableUrls.add(it) }
+                  return@answerLoop
+                }
+                val fetched =
+                  try {
+                    fhirEngine.get(ResourceType.DocumentReference, documentReferenceId)
+                      as DocumentReference
+                  } catch (notFound: ResourceNotFoundException) {
+                    // Absent from the engine has two very different meanings, and the sync worker
+                    // produces the harmless one far more often: once an image is uploaded and
+                    // verified, the worker purges the row while the id stays valid on the server.
+                    // The ledger records exactly those ids. Dropping such an answer would delete a
+                    // perfectly good image from the submission, so only answers whose id was never
+                    // confirmed uploaded are treated as dangling.
+                    if (uploadedDocumentReferenceLedger.wasUploaded(documentReferenceId)) {
+                      Timber.i(
+                        "DocumentReference %s referenced by %s was already uploaded and purged locally; keeping the attachment.",
+                        documentReferenceId,
+                        image.linkId,
+                      )
+                      uploadedButPurgedIds.add(documentReferenceId)
+                    } else {
+                      Timber.e(
+                        "DocumentReference %s referenced by %s is missing locally and was never confirmed on the server; dropping the dangling attachment so the submitted QuestionnaireResponse does not reference a resource the server never received (root cause of the DocumentReference 404).",
+                        documentReferenceId,
+                        image.linkId,
+                      )
+                      image.answer.remove(answer)
+                      missingReferences.add(
+                        MissingDocumentReference(image.linkId, documentReferenceId),
+                      )
+                    }
+                    return@answerLoop
+                  } catch (cancellation: CancellationException) {
+                    // The submit coroutine is going away (user backed out, activity finishing).
+                    // Do not keep looping on a dead scope — and do not report the remaining
+                    // documents as reconciled when they were never looked at.
+                    throw cancellation
+                  } catch (e: Exception) {
+                    Timber.e(e, "Error fetching DocumentReference status for ID: $documentReferenceId")
+                    failedFlips.add(MissingDocumentReference(image.linkId, documentReferenceId))
+                    return@answerLoop
+                  }
+                if (fetched.description == DocumentReferenceCaseType.DRAFT.name) {
+                  fetched.description = DocumentReferenceCaseType.SUBMITTED.name
+                  try {
+                    fhirEngine.update(fetched)
+                  } catch (cancellation: CancellationException) {
+                    throw cancellation
+                  } catch (e: Exception) {
+                    // A DocumentReference left at DRAFT is invisible to AppSyncWorker, so its image
+                    // is never uploaded — the response ends up referencing a resource that exists
+                    // (the metadata sync PUTs it regardless) but has no binary. Silent until now;
+                    // the caller turns this into an analytics event.
+                    Timber.e(e, "Failed to flip DocumentReference $documentReferenceId to SUBMITTED; its image will not be uploaded")
+                    failedFlips.add(MissingDocumentReference(image.linkId, documentReferenceId))
+                    return@answerLoop
+                  }
+                  submittedDraftIds.add(documentReferenceId)
+                  Timber.i("DocumentReference $documentReferenceId description updated to SUBMITTED")
+                }
+              }
+            }
+          }
+      }
+    Timber.d("=== Finished DocumentReference update processing ===")
+
+    return DocumentReferenceReconciliationResult(
+      submittedDraftIds = submittedDraftIds,
+      missingReferences = missingReferences,
+      unparseableUrls = unparseableUrls,
+      uploadedButPurgedIds = uploadedButPurgedIds,
+      failedFlips = failedFlips,
+    )
+  }
+
+  /**
+   * Extracts the DocumentReference logical id from a binary-access-read URL of the form
+   * `.../DocumentReference/{id}/$binary-access-read?...`. Returns null when [url] is null or the id
+   * cannot be located.
+   */
+  @VisibleForTesting
+  internal fun extractDocumentReferenceIdFromUrl(url: String?): String? {
+    if (url == null) return null
+    return Regex("DocumentReference/([^/]+)/").find(url)?.groupValues?.get(1)
+  }
+
+  /**
+   * This function performs data extraction against the [QuestionnaireResponse]. All the resources
+   * generated from a successful extraction by StructureMap or definition are stored in the
+   * database. The [QuestionnaireResponse] is also stored in the database regardless of the outcome
+   * of [ResourceMapper.extract]. This function will optionally generate CarePlan using the
+   * PlanDefinition resource configured in [QuestionnaireConfig.planDefinitions]. The
+   * [QuestionnaireConfig.eventWorkflows] contains configurations to cascade update the statuses of
+   * resources to in-active (close) that are related to the current [QuestionnaireResponse.subject]
+   */
+  fun handleQuestionnaireSubmission(
+    questionnaire: Questionnaire,
+    currentQuestionnaireResponse: QuestionnaireResponse,
+    questionnaireConfig: QuestionnaireConfig,
+    actionParameters: List<ActionParameter>,
+    context: Context,
+    /**
+     * Invoked when the submission is abandoned with nothing saved and the user is left on the
+     * questionnaire. The submit button locks itself when it hands over a response and stays locked
+     * for the whole extract-and-save window, so it has to be told it can reopen — otherwise a failed
+     * submission leaves the user unable to retry. Deliberately not invoked from the catch below:
+     * resources may be partially saved there, and retrying could register the case twice.
+     *
+     * Declared before [onSuccessfulSubmission] so that stays the trailing lambda at every call site.
+     */
+    onSubmissionAbandoned: () -> Unit = {},
+    /**
+     * Invoked with the required questions the response leaves unanswered, so the caller can name
+     * them for the user. Always followed by [onSubmissionAbandoned]; nothing has been saved.
+     */
+    onIncompleteSubmission: (List<UnansweredRequiredQuestion>) -> Unit = {},
+    onSuccessfulSubmission: (List<IdType>, QuestionnaireResponse) -> Unit,
+  ) {
+    viewModelScope.launch(SupervisorJob()) {
+     try {
+
+      // Attach the user-facing reference id at most once: an edited response already carries the
+      // id the case was registered with, and adding a second aa-reference-id item would let the
+      // StructureMap overwrite the permanent id with a fresh random one.
+      if (currentQuestionnaireResponse.item.none { it.linkId == AA_REFERENCE_ID_LINK_ID }) {
+        val idItem = QuestionnaireResponse.QuestionnaireResponseItemComponent().apply {
+          linkId = AA_REFERENCE_ID_LINK_ID
+          addAnswer(
+            QuestionnaireResponse.QuestionnaireResponseItemAnswerComponent().apply {
+              value = StringType(sessionReferenceId)
+            }
+          )
+        }
+        currentQuestionnaireResponse.addItem(idItem)
+      }
+
+      val questionnaireResponseValid =
+        validateQuestionnaireResponse(
+          questionnaire = questionnaire,
+          questionnaireResponse = currentQuestionnaireResponse,
+          context = context,
+        )
+
+      if (questionnaireConfig.saveQuestionnaireResponse && !questionnaireResponseValid) {
+        Timber.e("Invalid questionnaire response")
+        context.showToast(context.getString(R.string.questionnaire_response_invalid))
+        setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+        // Nothing was saved; let the user fix the response and submit again.
+        allowSubmissionRetry()
+        onSubmissionAbandoned()
+        return@launch
+      }
+
+      currentQuestionnaireResponse.processMetadata(questionnaire, questionnaireConfig, context)
+
+      val bundle =
+        performExtraction(
+          extractByStructureMap = questionnaire.extractByStructureMap(),
+          questionnaire = questionnaire,
+          questionnaireResponse = currentQuestionnaireResponse,
+          context = context,
+        )
+
+      // Last gate before anything is written or synced. Extraction is pure — it only builds the
+      // Bundle in memory — so every abort below leaves the device exactly as it was and releases the
+      // submission latch, letting the user fix the form and submit again.
+
+      // A required question with no answer must never reach the server. The library checks this on
+      // its own submit button, but the response has been through the app's hands since then; see
+      // [findUnansweredRequiredQuestions].
+      val unansweredRequiredQuestions =
+        findUnansweredRequiredQuestions(questionnaire, currentQuestionnaireResponse)
+      if (unansweredRequiredQuestions.isNotEmpty()) {
+        Timber.e(
+          "Blocking submission of ${questionnaireConfig.id}: required question(s) unanswered: %s",
+          unansweredRequiredQuestions.joinToString { it.linkId },
+        )
+        setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+        allowSubmissionRetry()
+        onIncompleteSubmission(unansweredRequiredQuestions)
+        onSubmissionAbandoned()
+        return@launch
+      }
+
+      // performExtraction swallows failures and returns an empty Bundle. For a fresh registration
+      // (no subject yet) that means nothing would be saved — not even the QuestionnaireResponse —
+      // and reporting success would silently lose the case. Fail loudly
+      // and release the submission latch: nothing was saved, so retrying cannot duplicate.
+      if (
+        extractionProducedNothingUsable(
+          bundle = bundle,
+          questionnaire = questionnaire,
+          questionnaireConfig = questionnaireConfig,
+          questionnaireResponse = currentQuestionnaireResponse,
+        )
+      ) {
+        Timber.e(
+          "Extraction produced no usable resources for ${questionnaireConfig.id}; aborting submission",
+        )
+        setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+        context.showToast(
+          context.getString(R.string.questionnaire_submission_failed),
+          Toast.LENGTH_LONG,
+        )
+        allowSubmissionRetry()
+        onSubmissionAbandoned()
+        return@launch
+      }
+
+      saveExtractedResources(
+        bundle = bundle,
+        questionnaire = questionnaire,
+        questionnaireConfig = questionnaireConfig,
+        questionnaireResponse = currentQuestionnaireResponse,
+        context = context,
+      )
+
+      updateResourcesLastUpdatedProperty(actionParameters)
+
+      // Important to load subject resource to retrieve ID (as reference) correctly
+      val subjectIdType: IdType? =
+        if (currentQuestionnaireResponse.subject.reference.isNullOrEmpty()) {
+          null
+        } else {
+          IdType(currentQuestionnaireResponse.subject.reference)
+        }
+
+      if (subjectIdType != null) {
+        val subject =
+          loadResource(ResourceType.valueOf(subjectIdType.resourceType), subjectIdType.idPart)
+
+        if (subject != null && !questionnaireConfig.isReadOnly()) {
+          val newBundle = bundle.copyBundle(currentQuestionnaireResponse)
+
+          generateCarePlan(
+            subject = subject,
+            bundle = newBundle,
+            questionnaireConfig = questionnaireConfig,
+          )
+
+          withContext(dispatcherProvider.io()) {
+            executeCql(
+              subject = subject,
+              bundle = newBundle,
+              questionnaire = questionnaire,
+              questionnaireConfig = questionnaireConfig,
+            )
+          }
+
+          fhirCarePlanGenerator.conditionallyUpdateResourceStatus(
+            questionnaireConfig = questionnaireConfig,
+            subject = subject,
+            bundle = newBundle,
+          )
+        }
+      }
+
+      softDeleteResources(questionnaireConfig)
+
+      val idTypes =
+        bundle.entry?.map { IdType(it.resource.resourceType.name, it.resource.logicalId) }
+          ?: emptyList()
+      onSuccessfulSubmission(idTypes, currentQuestionnaireResponse)
+
+      // Push the case up now if there is a network. The case is already saved locally as a pending
+      // local change, so on an offline device this is a no-op by design: SyncBroadcaster skips the
+      // request rather than running a sync that can only fail, and the connectivity-constrained
+      // periodic worker uploads it once the device is back online.
+      syncBroadcaster.runOneTimeSync()
+     } catch (exception: Exception) {
+       // Resources may have been partially saved at this point, so the submission latch stays
+       // set: retrying could register the case twice. Surface the failure instead of leaving
+       // the progress dialog stuck forever.
+       Timber.e(exception, "Questionnaire submission failed for ${questionnaireConfig.id}")
+       setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+       context.showToast(
+         context.getString(R.string.questionnaire_submission_failed),
+         Toast.LENGTH_LONG,
+       )
+     }
+    }
+  }
+
+  /**
+   * Whether the extraction left nothing worth saving.
+   *
+   * Two shapes of failure, both of which would otherwise register a case that opens blank:
+   * - an empty Bundle for a fresh registration — [performExtraction] swallows StructureMap failures
+   *   and returns one, so nothing at all would be written, not even the QuestionnaireResponse;
+   * - a Bundle with no subject resource, or a subject resource carrying nothing but bookkeeping
+   *   (id/meta/text/identifier). That is what a StructureMap that runs but maps nothing produces:
+   *   a Patient husk with no name, gender or address behind a valid-looking reference id.
+   *
+   * Only fresh registrations are judged on the subject resource. An edit or follow-up already has
+   * its subject, and legitimately extracts Observations and Encounters instead.
+   */
+  @VisibleForTesting
+  internal fun extractionProducedNothingUsable(
+    bundle: Bundle,
+    questionnaire: Questionnaire,
+    questionnaireConfig: QuestionnaireConfig,
+    questionnaireResponse: QuestionnaireResponse,
+  ): Boolean {
+    val isFreshRegistration = questionnaireResponse.subject.reference.isNullOrEmpty()
+    if (bundle.entry.isNullOrEmpty()) return isFreshRegistration
+    if (!isFreshRegistration) return false
+
+    val subjectType = questionnaireSubjectType(questionnaire, questionnaireConfig) ?: return false
+    val subject =
+      bundle.entry.mapNotNull { it.resource }.firstOrNull { it.resourceType == subjectType }
+        ?: return true
+    return subject.carriesOnlyBookkeeping()
+  }
+
+  /** True when every populated element of this resource is metadata rather than entered data. */
+  private fun Resource.carriesOnlyBookkeeping(): Boolean =
+    children().none { property ->
+      property.name !in BOOKKEEPING_ELEMENTS && property.hasValues()
+    }
+
+  suspend fun saveExtractedResources(
+    bundle: Bundle,
+    questionnaire: Questionnaire,
+    questionnaireConfig: QuestionnaireConfig,
+    questionnaireResponse: QuestionnaireResponse,
+    context: Context,
+  ) {
+    val extractionDate = Date()
+
+    // Create a ListResource to store the references for generated resources
+    val listResource =
+      ListResource().apply {
+        id = UUID.randomUUID().toString()
+        status = ListResource.ListStatus.CURRENT
+        mode = ListResource.ListMode.WORKING
+        title = CONTAINED_LIST_TITLE
+        date = extractionDate
+      }
+
+    val subjectType = questionnaireSubjectType(questionnaire, questionnaireConfig)
+
+    val previouslyExtractedResources =
+      retrievePreviouslyExtractedResources(
+        questionnaireConfig = questionnaireConfig,
+        subjectType = subjectType,
+        questionnaire = questionnaire,
+      )
+
+    val extractedResourceUniquePropertyExpressionsMap =
+      questionnaireConfig.extractedResourceUniquePropertyExpressions?.associateBy {
+        it.resourceType
+      } ?: emptyMap()
+
+    bundle.entry?.forEach { bundleEntryComponent ->
+      bundleEntryComponent.resource?.run {
+        applyResourceMetadata(questionnaireConfig, questionnaireResponse, context)
+        if (
+          questionnaireResponse.subject.reference.isNullOrEmpty() &&
+          subjectType != null &&
+          resourceType == subjectType &&
+          logicalId.isNotEmpty()
+        ) {
+          questionnaireResponse.subject = this.logicalId.asReference(subjectType)
+        }
+        if (questionnaireConfig.isEditable()) {
+          if (resourceType == subjectType) {
+            this.id = questionnaireResponse.subject.extractId()
+          } else if (
+            extractedResourceUniquePropertyExpressionsMap.containsKey(resourceType) &&
+            previouslyExtractedResources.containsKey(
+              resourceType,
+            )
+          ) {
+            val fhirPathExpression =
+              extractedResourceUniquePropertyExpressionsMap
+                .getValue(resourceType)
+                .fhirPathExpression
+
+            val currentResourceIdentifier =
+              fhirPathDataExtractor.extractValue(
+                base = this,
+                expression = fhirPathExpression,
+              )
+
+            // Search for resource with property value matching extracted value
+            val resource =
+              previouslyExtractedResources.getValue(resourceType).find {
+                val extractedValue =
+                  fhirPathDataExtractor.extractValue(
+                    base = it,
+                    expression = fhirPathExpression,
+                  )
+                extractedValue.isNotEmpty() &&
+                        extractedValue.equals(currentResourceIdentifier, true)
+              }
+
+            // Found match use the id on current resource; override identifiers for RelatedPerson
+            if (resource != null) {
+              this.id = resource.logicalId
+              if (this is RelatedPerson && resource is RelatedPerson) {
+                this.identifier = resource.identifier
+              }
+            }
+          }
+        }
+
+        // The register/profile screens surface the aa-reference-id from Patient.identifier; a
+        // stale server StructureMap (or a failed identifier rule) leaves it blank and the app
+        // shows "Not Available". Guarantee it here: new patients get the id generated for this
+        // session, edited patients keep the id they were registered with.
+        if (this is Patient && resourceType == subjectType) {
+          ensureReferenceIdIdentifier(this, questionnaireConfig, questionnaireResponse)
+        }
+
+        // Set the Group's Related Entity Location metadata tag on Resource before saving.
+        this.applyRelatedEntityLocationMetaTag(questionnaireConfig, context, subjectType)
+
+        defaultRepository.addOrUpdate(true, resource = this)
+
+        updateGroupManagingEntity(
+          resource = this,
+          groupIdentifier = questionnaireConfig.groupResource?.groupIdentifier,
+          managingEntityRelationshipCode = questionnaireConfig.managingEntityRelationshipCode,
+        )
+        addMemberToGroup(
+          resource = this,
+          memberResourceType = questionnaireConfig.groupResource?.memberResourceType,
+          groupIdentifier = questionnaireConfig.groupResource?.groupIdentifier,
+        )
+
+        // Track ids for resources in ListResource added to the QuestionnaireResponse.contained
+        val listEntryComponent =
+          ListEntryComponent().apply {
+            deleted = false
+            date = extractionDate
+            item = asReference()
+          }
+        listResource.addEntry(listEntryComponent)
+      }
+    }
+
+    // Reference extracted resources in QR then save it if subject exists
+    questionnaireResponse.apply { addContained(listResource) }
+
+    if (
+      !questionnaireResponse.subject.reference.isNullOrEmpty() &&
+      questionnaireConfig.saveQuestionnaireResponse
+    ) {
+      // Set the Group's Related Entity Location meta tag on QuestionnaireResponse then save.
+      questionnaireResponse.applyRelatedEntityLocationMetaTag(
+        questionnaireConfig,
+        context,
+        subjectType,
+      )
+      defaultRepository.addOrUpdate(resource = questionnaireResponse)
+    }
+  }
+
+  /**
+   * Guarantees the subject [Patient] carries the user-facing reference-id identifier (system
+   * [PATIENT_REFERENCE_ID_SYSTEM]) with a non-blank value before it is saved:
+   * - Editing an existing case: the reference id is permanent, so the identifier already stored
+   *   on the patient wins over whatever this extraction produced.
+   * - New registration: when the StructureMap did not populate the identifier (stale map on the
+   *   server, failed rule) it is filled from the aa-reference-id answer of the
+   *   [QuestionnaireResponse].
+   */
+  private suspend fun ensureReferenceIdIdentifier(
+    patient: Patient,
+    questionnaireConfig: QuestionnaireConfig,
+    questionnaireResponse: QuestionnaireResponse,
+  ) {
+    val storedValue =
+      if (questionnaireConfig.isEditable()) {
+        runCatching { loadResource(ResourceType.Patient, patient.logicalId) as? Patient }
+          .getOrNull()
+          ?.referenceIdIdentifier()
+          ?.value
+          ?.takeUnless { it.isBlank() }
+      } else {
+        null
+      }
+
+    val referenceId =
+      storedValue
+        ?: patient.referenceIdIdentifier()?.value?.takeUnless { it.isBlank() }
+        ?: questionnaireResponse.item
+          .firstOrNull { it.linkId == AA_REFERENCE_ID_LINK_ID }
+          ?.answerFirstRep
+          ?.value
+          ?.primitiveValue()
+        ?: return
+
+    val identifier =
+      patient.referenceIdIdentifier()
+        ?: Identifier()
+          .apply {
+            use = Identifier.IdentifierUse.SECONDARY
+            system = PATIENT_REFERENCE_ID_SYSTEM
+          }
+          // First position so identifierFirstRep (what the UI shows) is the reference id even
+          // when other identifiers (e.g. ABHA) exist.
+          .also { patient.identifier.add(0, it) }
+    identifier.value = referenceId
+  }
+
+  private fun Patient.referenceIdIdentifier(): Identifier? =
+    identifier.firstOrNull { it.system == PATIENT_REFERENCE_ID_SYSTEM }
+
+  private suspend fun Resource.applyRelatedEntityLocationMetaTag(
+    questionnaireConfig: QuestionnaireConfig,
+    context: Context,
+    subjectType: ResourceType?,
+  ) {
+    val resourceIdPair =
+      when {
+        !questionnaireConfig.resourceIdentifier.isNullOrEmpty() && subjectType != null -> {
+          Pair(subjectType, questionnaireConfig.resourceIdentifier!!)
+        }
+        !questionnaireConfig.groupResource?.groupIdentifier.isNullOrEmpty() &&
+                questionnaireConfig.groupResource?.removeGroup != true &&
+                questionnaireConfig.groupResource?.removeMember != true -> {
+          Pair(ResourceType.Group, questionnaireConfig.groupResource!!.groupIdentifier)
+        }
+        else -> null
+      }
+    if (resourceIdPair != null) {
+      val (resourceType, resourceId) = resourceIdPair
+      val resource = loadResource(resourceType = resourceType, resourceIdentifier = resourceId)
+      if (resource != null) {
+        val system =
+          context.getString(
+            org.smartregister.fhircore.engine.R.string.sync_strategy_related_entity_location_system,
+          )
+        resource.meta.tag.filter { coding -> coding.system == system }.forEach(this.meta::addTag)
+      }
+    }
+  }
+
+  private suspend fun retrievePreviouslyExtractedResources(
+    questionnaireConfig: QuestionnaireConfig,
+    subjectType: ResourceType?,
+    questionnaire: Questionnaire,
+  ): MutableMap<ResourceType, MutableList<Resource>> {
+    val referencedResources = mutableMapOf<ResourceType, MutableList<Resource>>()
+    if (
+      questionnaireConfig.isEditable() &&
+      !questionnaireConfig.resourceIdentifier.isNullOrEmpty() &&
+      subjectType != null
+    ) {
+      searchLatestQuestionnaireResponse(
+        resourceId = questionnaireConfig.resourceIdentifier!!,
+        resourceType = questionnaireConfig.resourceType ?: subjectType,
+        questionnaireId = questionnaire.logicalId,
+      )
+        ?.contained
+        ?.asSequence()
+        ?.filterIsInstance<ListResource>()
+        ?.filter { it.title.equals(CONTAINED_LIST_TITLE, true) }
+        ?.flatMap { it.entry }
+        ?.forEach {
+          val idType = IdType(it.item.reference)
+          val resource = loadResource(ResourceType.fromCode(idType.resourceType), idType.idPart)
+          if (resource != null) {
+            referencedResources.getOrPut(resource.resourceType) { mutableListOf() }.add(resource)
+          }
+        }
+    }
+    return referencedResources
+  }
+
+  private fun Bundle.copyBundle(currentQuestionnaireResponse: QuestionnaireResponse): Bundle =
+    this.copy().apply {
+      addEntry(Bundle.BundleEntryComponent().apply { resource = currentQuestionnaireResponse })
+    }
+
+  private fun QuestionnaireResponse.processMetadata(
+    questionnaire: Questionnaire,
+    questionnaireConfig: QuestionnaireConfig,
+    context: Context,
+  ) {
+    status = QuestionnaireResponse.QuestionnaireResponseStatus.COMPLETED
+    authored = Date()
+
+    questionnaire.useContext
+      .filter { it.hasValueCodeableConcept() }
+      .forEach { it.valueCodeableConcept.coding.forEach { coding -> this.meta.addTag(coding) } }
+    applyResourceMetadata(questionnaireConfig, this, context)
+    setQuestionnaire("${questionnaire.resourceType}/${questionnaire.logicalId}")
+
+    // Set subject if exists
+    val resourceType = questionnaireSubjectType(questionnaire, questionnaireConfig)
+    val resourceIdentifier = questionnaireConfig.resourceIdentifier
+    if (resourceType != null && !resourceIdentifier.isNullOrEmpty()) {
+      subject = resourceIdentifier.asReference(resourceType)
+    }
+  }
+
+  private fun questionnaireSubjectType(
+    questionnaire: Questionnaire,
+    questionnaireConfig: QuestionnaireConfig,
+  ): ResourceType? {
+    val questionnaireSubjectType = questionnaire.subjectType.firstOrNull()?.code
+    return questionnaireConfig.resourceType
+      ?: questionnaireSubjectType?.let {
+        ResourceType.valueOf(
+          it,
+        )
+      }
+  }
+
+  private fun Resource?.applyResourceMetadata(
+    questionnaireConfig: QuestionnaireConfig,
+    questionnaireResponse: QuestionnaireResponse,
+    context: Context,
+  ) =
+    this?.apply {
+      appendOrganizationInfo(authenticatedOrganizationIds)
+      appendPractitionerInfo(practitionerId)
+      appendRelatedEntityLocation(questionnaireResponse, questionnaireConfig, context)
+      updateLastUpdated()
+      generateMissingId()
+    }
+
+  /**
+   * Perform StructureMap or Definition based definition. The result of this function returns a
+   * Bundle that contains the resources that were generated via the [ResourceMapper.extract]
+   * operation otherwise returns null if an exception is encountered.
+   */
+  suspend fun performExtraction(
+    extractByStructureMap: Boolean,
+    questionnaire: Questionnaire,
+    questionnaireResponse: QuestionnaireResponse,
+    context: Context,
+  ): Bundle =
+    kotlin
+      .runCatching {
+        if (extractByStructureMap) {
+          ResourceMapper.extract(
+            questionnaire = questionnaire,
+            questionnaireResponse = questionnaireResponse,
+            structureMapExtractionContext =
+              StructureMapExtractionContext(
+                transformSupportServices = transformSupportServices,
+                structureMapProvider = { structureMapUrl: String?, _: IWorkerContext ->
+                  structureMapUrl?.substringAfterLast("/")?.let {
+                    defaultRepository.loadResource(it)
+                  }
+                },
+              ),
+          )
+        } else {
+          ResourceMapper.extract(
+            questionnaire = questionnaire,
+            questionnaireResponse = questionnaireResponse,
+          )
+        }
+      }
+      .onFailure { exception ->
+        Timber.e(exception)
+        viewModelScope.launch(dispatcherProvider.main()) {
+          if (exception is NullPointerException && exception.message!!.contains("StructureMap")) {
+            context.showToast(
+              context.getString(R.string.structure_map_missing_message),
+              Toast.LENGTH_LONG,
+            )
+          } else {
+            context.showToast(
+              context.getString(R.string.structuremap_failed, questionnaire.name),
+              Toast.LENGTH_LONG,
+            )
+          }
+        }
+      }
+      .getOrDefault(Bundle())
+
+  /**
+   * The required questions of [questionnaire] that [questionnaireResponse] does not actually answer.
+   *
+   * The data capture library already blocks its own submit button on required fields, but that check
+   * happens *before* the app gets the response, and the app then keeps working on it — most notably
+   * [reconcileDocumentReferencesForSubmission], which deletes screening-image answers whose
+   * DocumentReference has gone missing locally, and `patient-screening-image-1` is required. This is
+   * the last look at the data before anything is written or synced.
+   *
+   * It is deliberately stricter than the library's `RequiredValidator`, which is satisfied by
+   * `answer.any { it.hasValue() }`: a whitespace-only name, a Coding with neither code nor display
+   * and an Attachment with neither url nor data all count as answers there and as missing here.
+   *
+   * Never reports a question the user was not asked:
+   * - hidden items (and everything nested under them) are skipped, exactly as the library does;
+   * - an item absent from the response is only reported when its parent group *is* present and the
+   *   item has no `enableWhen` of its own — a disabled item is legitimately absent, because
+   *   `QuestionnaireFragment.getQuestionnaireResponse()` strips disabled items on the way out.
+   */
+  fun findUnansweredRequiredQuestions(
+    questionnaire: Questionnaire,
+    questionnaireResponse: QuestionnaireResponse,
+  ): List<UnansweredRequiredQuestion> {
+    val responseItems =
+      mutableMapOf<String, MutableList<QuestionnaireResponse.QuestionnaireResponseItemComponent>>()
+    indexResponseItems(questionnaireResponse.item, responseItems)
+
+    val unanswered = mutableListOf<UnansweredRequiredQuestion>()
+    collectUnansweredRequiredQuestions(
+      items = questionnaire.item,
+      parentPresentInResponse = true,
+      responseItems = responseItems,
+      unanswered = unanswered,
+    )
+    return unanswered
+  }
+
+  /** Indexes every response item by linkId, including those nested under an answer. */
+  private fun indexResponseItems(
+    items: List<QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    into: MutableMap<String, MutableList<QuestionnaireResponse.QuestionnaireResponseItemComponent>>,
+  ) {
+    items.forEach { item ->
+      item.linkId?.let { into.getOrPut(it) { mutableListOf() }.add(item) }
+      indexResponseItems(item.item, into)
+      item.answer.forEach { indexResponseItems(it.item, into) }
+    }
+  }
+
+  private fun collectUnansweredRequiredQuestions(
+    items: List<Questionnaire.QuestionnaireItemComponent>,
+    parentPresentInResponse: Boolean,
+    responseItems:
+      Map<String, List<QuestionnaireResponse.QuestionnaireResponseItemComponent>>,
+    unanswered: MutableList<UnansweredRequiredQuestion>,
+  ) {
+    items.forEach { item ->
+      if (item.isHiddenQuestionnaireItem()) return@forEach
+
+      val presentInResponse = responseItems.containsKey(item.linkId)
+      val answerable =
+        item.type != Questionnaire.QuestionnaireItemType.GROUP &&
+          item.type != Questionnaire.QuestionnaireItemType.DISPLAY &&
+          item.type != Questionnaire.QuestionnaireItemType.NULL
+
+      if (item.required && answerable) {
+        val missing =
+          if (presentInResponse) {
+            responseItems.getValue(item.linkId).none { responseItem ->
+              responseItem.answer.any { it.hasRealValue() }
+            }
+          } else {
+            parentPresentInResponse && !item.hasEnableWhen()
+          }
+        if (missing) {
+          unanswered.add(
+            UnansweredRequiredQuestion(
+              linkId = item.linkId,
+              label = item.text?.takeIf { it.isNotBlank() } ?: item.linkId,
+            ),
+          )
+        }
+      }
+
+      collectUnansweredRequiredQuestions(
+        items = item.item,
+        parentPresentInResponse = presentInResponse,
+        responseItems = responseItems,
+        unanswered = unanswered,
+      )
+    }
+  }
+
+  private fun Questionnaire.QuestionnaireItemComponent.isHiddenQuestionnaireItem(): Boolean =
+    (getExtensionByUrl(EXTENSION_HIDDEN_URL)?.value as? BooleanType)?.booleanValue() == true
+
+  /**
+   * Whether this answer holds something a human actually entered. `hasValue()` is not enough: it is
+   * true for a blank string and for an empty Coding or Attachment shell.
+   */
+  private fun QuestionnaireResponse.QuestionnaireResponseItemAnswerComponent.hasRealValue():
+    Boolean {
+    val answerValue = value ?: return false
+    return when (answerValue) {
+      is Attachment -> !answerValue.url.isNullOrBlank() || answerValue.hasData()
+      is Coding -> !answerValue.code.isNullOrBlank() || !answerValue.display.isNullOrBlank()
+      is Reference -> !answerValue.reference.isNullOrBlank()
+      else -> answerValue.primitiveValue()?.isNotBlank() ?: !answerValue.isEmpty
+    }
+  }
+
+  /** True when this item, or anything nested under it, carries an answer value. */
+  private fun QuestionnaireResponse.QuestionnaireResponseItemComponent.hasAnyAnswer(): Boolean =
+    answer.any { it.hasValue() || it.item.any(::hasAnyAnswerIn) } || item.any(::hasAnyAnswerIn)
+
+  private fun hasAnyAnswerIn(
+    item: QuestionnaireResponse.QuestionnaireResponseItemComponent,
+  ): Boolean = item.hasAnyAnswer()
+
+  /** Depth-first lookup of the first item carrying [linkId], or null when the form has no such item. */
+  private fun findItemByLinkId(
+    items: List<QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    linkId: String,
+  ): QuestionnaireResponse.QuestionnaireResponseItemComponent? {
+    items.forEach { item ->
+      if (item.linkId == linkId) return item
+      findItemByLinkId(item.item, linkId)?.let { return it }
+    }
+    return null
+  }
+
+  /**
+   * Whether this response holds anything worth keeping as a draft.
+   *
+   * "Has any answer" is not enough on its own: a registration form opens with answers already in
+   * place — the age-unit radio's `initialSelected`, and the FLW's district/state pre-filled from
+   * their Practitioner record — so an untouched form looks answered, and every Add-New-Case followed
+   * by back saved another empty guest draft.
+   *
+   * The patient's given name is the agreed minimum: no name, no draft. Forms with no such item (any
+   * other draft-enabled questionnaire) keep the previous any-answer behaviour, so this stays correct
+   * beyond the registration flow.
+   */
+  fun hasDraftWorthyData(questionnaireResponse: QuestionnaireResponse): Boolean {
+    val givenName = findItemByLinkId(questionnaireResponse.item, PATIENT_GIVEN_NAME_LINK_ID)
+    return if (givenName != null) {
+      givenName.answer.any { !it.value?.primitiveValue().isNullOrBlank() }
+    } else {
+      questionnaireResponse.item.any { it.hasAnyAnswer() }
+    }
+  }
+
+  /**
+   * Saves [questionnaireResponse] as a draft, provided the user actually entered something — see
+   * [hasDraftWorthyData].
+   */
+  fun saveDraftQuestionnaire(
+    questionnaireResponse: QuestionnaireResponse,
+    /**
+     * Invoked exactly once, on the main thread, when the save has settled, with true only when a
+     * draft was really written. The caller shows a blocking progress dialog while this is running,
+     * so a path that never reports back leaves the user stuck on a spinner; that is what the old
+     * `catch` branch did, because only the success paths posted [_isDraftSaved].
+     */
+    onSaved: (saved: Boolean) -> Unit = {},
+  ) {
+    viewModelScope.launch {
+      var saved = false
+      try {
+        saved = persistDraft(questionnaireResponse)
+      } finally {
+        // Settled either way: the caller is holding a modal progress dialog open until it hears
+        // back, so this has to run on every path — including a failure inside persistDraft.
+        _isDraftSaved.postValue(true)
+        onSaved(saved)
+      }
+    }
+  }
+
+  /** Returns true when a draft was actually written. */
+  private suspend fun persistDraft(questionnaireResponse: QuestionnaireResponse): Boolean {
+      val questionnaireHasAnswer = hasDraftWorthyData(questionnaireResponse)
+      if (!questionnaireHasAnswer) {
+        Timber.i("Nothing entered on the questionnaire; not saving an empty draft")
+        return false
+      }
+      return try {
+          val ref = Reference().apply { reference =  "Practitioner/${getUserName()}"}
+          // set author
+          questionnaireResponse.author = ref
+          questionnaireResponse.id = questionnaireResponse.id ?: UUID.randomUUID().toString()
+          questionnaireResponse.meta.lastUpdated = Date()
+
+          val userName = getUserName()
+          val responses = fhirEngine.search<QuestionnaireResponse> {
+          }.map {
+            it.resource
+          }.filter {
+            (it.status == QuestionnaireResponse.QuestionnaireResponseStatus.INPROGRESS) &&
+                    (it.author?.reference?.toString()?.substringAfter("/") ?: "").equals(userName, false)
+          }
+            .sortedByDescending { it.meta.lastUpdated }
+
+          if (responses.find { it.id == questionnaireResponse.id } != null){
+            defaultRepository.addOrUpdate(addMandatoryTags = true, resource = questionnaireResponse)
+            return true
+          }
+          val draftResponsesJson = getAllDraftsJsonFromSharedPreferences(sharedPreferencesHelper)
+          var draftResBundle = parseDraftResponses(parser, draftResponsesJson)
+
+          val entryIndex = draftResBundle?.entry?.indexOfFirst {
+            it.resource.id == (questionnaireResponse.id ?: -1)
+          }
+
+          val entity = Bundle.BundleEntryComponent().apply { resource = questionnaireResponse }
+
+          if (entryIndex != null && entryIndex != -1) {
+            draftResBundle?.entry?.set(entryIndex, entity)
+          } else {
+            if (draftResBundle == null || draftResBundle.entry?.isEmpty() == true){
+              draftResBundle = Bundle().apply {
+                addEntry(entity)
+              }
+            }else{
+              draftResBundle.addEntry(entity)
+            }
+          }
+
+          // Save the updated bundle
+          draftResBundle?.let {
+            val bundleJson = parser.encodeResourceToString(draftResBundle)
+            sharedPreferencesHelper.write<String>(SharedPreferenceKey.DRAFTS.name, bundleJson)
+          }
+          true
+        }catch (exception: Exception){
+          Timber.e(exception, "An error occurred while saveDraftQuestionnaire")
+          false
+        }
+  }
+
+  /**
+   * This function updates the _lastUpdated property of resources configured by the
+   * [ActionParameter.paramType] of [ActionParameterType.UPDATE_DATE_ON_EDIT]. Each time a
+   * questionnaire is submitted, the affected resources last modified/updated date will also be
+   * updated.
+   */
+  suspend fun updateResourcesLastUpdatedProperty(actionParameters: List<ActionParameter>?) {
+    val updateOnEditParams =
+      actionParameters?.filter {
+        it.paramType == ActionParameterType.UPDATE_DATE_ON_EDIT && it.value.isNotEmpty()
+      }
+
+    updateOnEditParams?.forEach { param ->
+      try {
+        defaultRepository.run {
+          val resourceType = param.resourceType
+          if (resourceType != null) {
+            loadResource(resourceType, param.value)?.let { addOrUpdate(resource = it) }
+          } else {
+            val valueResourceType = param.value.substringBefore("/")
+            val valueResourceId = param.value.substringAfter("/")
+            addOrUpdate(
+              resource = loadResource(valueResourceId, ResourceType.valueOf(valueResourceType)),
+            )
+          }
+        }
+      } catch (resourceNotFoundException: ResourceNotFoundException) {
+        Timber.e(resourceNotFoundException, "Unable to update resource's _lastUpdated")
+      } catch (illegalArgumentException: IllegalArgumentException) {
+        Timber.e(
+          "No enum constant org.hl7.fhir.r4.model.ResourceType.${param.value.substringBefore("/")}",
+        )
+      }
+    }
+  }
+
+  /**
+   * This function validates all [QuestionnaireResponse] and returns true if all the validation
+   * result of [QuestionnaireResponseValidator] are [Valid] or [NotValidated] (validation is
+   * optional on [Questionnaire] fields)
+   */
+  suspend fun validateQuestionnaireResponse(
+    questionnaire: Questionnaire,
+    questionnaireResponse: QuestionnaireResponse,
+    context: Context,
+  ): Boolean {
+    val validQuestionnaireResponseItems =
+      ArrayList<QuestionnaireResponse.QuestionnaireResponseItemComponent>()
+    val validQuestionnaireItems = ArrayList<Questionnaire.QuestionnaireItemComponent>()
+    val questionnaireItemsMap = questionnaire.item.groupBy { it.linkId }
+
+    // Only validate items that are present on both Questionnaire and the QuestionnaireResponse
+    questionnaireResponse.item.forEach {
+      if (questionnaireItemsMap.containsKey(it.linkId)) {
+        val questionnaireItem = questionnaireItemsMap.getValue(it.linkId).first()
+        validQuestionnaireResponseItems.add(it)
+        validQuestionnaireItems.add(questionnaireItem)
+      }
+    }
+
+    return QuestionnaireResponseValidator.validateQuestionnaireResponse(
+      questionnaire = Questionnaire().apply { item = validQuestionnaireItems },
+      questionnaireResponse =
+        QuestionnaireResponse().apply { item = validQuestionnaireResponseItems },
+      context = context,
+    )
+      .values
+      .flatten()
+      .all { it is Valid || it is NotValidated }
+  }
+
+  suspend fun executeCql(
+    subject: Resource,
+    bundle: Bundle,
+    questionnaire: Questionnaire,
+    questionnaireConfig: QuestionnaireConfig? = null,
+  ) {
+    questionnaireConfig?.cqlInputResources?.forEach { resourceId ->
+      val basicResource = defaultRepository.loadResource(resourceId) as Basic?
+      bundle.addEntry(Bundle.BundleEntryComponent().setResource(basicResource))
+    }
+
+    val libraryFilters =
+      questionnaire.cqfLibraryUrls().map {
+        val apply: TokenParamFilterCriterion.() -> Unit = { value = of(it.extractLogicalIdUuid()) }
+        apply
+      }
+
+    if (libraryFilters.isNotEmpty()) {
+      defaultRepository.fhirEngine
+        .search<Library> {
+          filter(
+            Resource.RES_ID,
+            *libraryFilters.toTypedArray(),
+          )
+        }
+        .forEach { librarySearchResult ->
+          val result: Parameters =
+            fhirOperator.evaluateLibrary(
+              librarySearchResult.resource.url,
+              subject.asReference().reference,
+              null,
+              bundle,
+              null,
+            ) as Parameters
+
+          result.parameter.mapNotNull { cqlResultParameterComponent ->
+            (cqlResultParameterComponent.value ?: cqlResultParameterComponent.resource)?.let {
+                resultParameterResource ->
+              if (
+                cqlResultParameterComponent.name.equals(OUTPUT_PARAMETER_KEY) &&
+                resultParameterResource.isResource
+              ) {
+                defaultRepository.create(true, resultParameterResource as Resource)
+              }
+
+              if (BuildConfig.DEBUG) {
+                Timber.d(
+                  "CQL :: Param found: ${cqlResultParameterComponent.name} with value: ${
+                    getStringRepresentation(
+                      resultParameterResource,
+                    )
+                  }",
+                )
+              }
+            }
+          }
+        }
+    }
+  }
+
+  private fun getStringRepresentation(base: Base): String =
+    if (base.isResource) parser.encodeResourceToString(base as Resource) else base.toString()
+
+  /**
+   * This function generates CarePlans for the [QuestionnaireResponse.subject] using the configured
+   * [QuestionnaireConfig.planDefinitions]
+   */
+  suspend fun generateCarePlan(
+    subject: Resource,
+    bundle: Bundle,
+    questionnaireConfig: QuestionnaireConfig,
+  ) {
+    questionnaireConfig.planDefinitions?.forEach { planId ->
+      kotlin
+        .runCatching {
+          fhirCarePlanGenerator.generateOrUpdateCarePlan(
+            planDefinitionId = planId,
+            subject = subject,
+            data = bundle,
+            generateCarePlanWithWorkflowApi = questionnaireConfig.generateCarePlanWithWorkflowApi,
+          )
+        }
+        .onFailure { Timber.e(it) }
+    }
+  }
+
+  /** Update the [Group.managingEntity] */
+  private suspend fun updateGroupManagingEntity(
+    resource: Resource,
+    groupIdentifier: String?,
+    managingEntityRelationshipCode: String?,
+  ) {
+    // Load the group from the database to get the updated Resource always.
+    val group =
+      groupIdentifier?.extractLogicalIdUuid()?.let { loadResource(ResourceType.Group, it) }
+              as Group?
+
+    if (
+      group != null &&
+      resource is RelatedPerson &&
+      !resource.relationshipFirstRep.codingFirstRep.code.isNullOrEmpty() &&
+      resource.relationshipFirstRep.codingFirstRep.code == managingEntityRelationshipCode
+    ) {
+      defaultRepository.addOrUpdate(
+        resource = group.apply { managingEntity = resource.asReference() },
+      )
+    }
+  }
+
+  /**
+   * Adds [Resource] to [Group.member] if the member does not exist and if [Resource.logicalId] is
+   * NOT the same as the retrieved [GroupResourceConfig.groupIdentifier] (Cannot add a [Group] as
+   * member of itself.
+   */
+  suspend fun addMemberToGroup(
+    resource: Resource,
+    memberResourceType: ResourceType?,
+    groupIdentifier: String?,
+  ) {
+    // Load the Group resource from the database to get the updated one
+    val group =
+      groupIdentifier?.extractLogicalIdUuid()?.let { loadResource(ResourceType.Group, it) }
+              as Group? ?: return
+
+    val reference = resource.asReference()
+    val member = group.member.find { it.entity.reference.equals(reference.reference, true) }
+
+    // Cannot add Group as member of itself; Cannot not duplicate existing members
+    if (resource.logicalId == group.logicalId || member != null) return
+
+    if (
+      resource.resourceType.isIn(
+        ResourceType.CareTeam,
+        ResourceType.Device,
+        ResourceType.Group,
+        ResourceType.HealthcareService,
+        ResourceType.Location,
+        ResourceType.Organization,
+        ResourceType.Patient,
+        ResourceType.Practitioner,
+        ResourceType.PractitionerRole,
+        ResourceType.Specimen,
+      ) && resource.resourceType == memberResourceType
+    ) {
+      group.addMember(Group.GroupMemberComponent().apply { entity = reference })
+      defaultRepository.addOrUpdate(resource = group)
+    }
+  }
+
+  /**
+   * This function triggers removal of [Resource] s as per the [QuestionnaireConfig.groupResource]
+   * or [QuestionnaireConfig.removeResource] config properties.
+   */
+  fun softDeleteResources(questionnaireConfig: QuestionnaireConfig) {
+    if (questionnaireConfig.groupResource != null) {
+      removeGroup(
+        groupId = questionnaireConfig.groupResource!!.groupIdentifier,
+        removeGroup = questionnaireConfig.groupResource?.removeGroup ?: false,
+        deactivateMembers = questionnaireConfig.groupResource!!.deactivateMembers,
+      )
+      removeGroupMember(
+        memberId = questionnaireConfig.resourceIdentifier,
+        removeMember = questionnaireConfig.groupResource?.removeMember ?: false,
+        groupIdentifier = questionnaireConfig.groupResource!!.groupIdentifier,
+        memberResourceType = questionnaireConfig.groupResource!!.memberResourceType,
+      )
+    }
+
+    if (
+      questionnaireConfig.removeResource == true &&
+      questionnaireConfig.resourceType != null &&
+      !questionnaireConfig.resourceIdentifier.isNullOrEmpty()
+    ) {
+      viewModelScope.launch {
+        defaultRepository.delete(
+          resourceType = questionnaireConfig.resourceType!!,
+          resourceId = questionnaireConfig.resourceIdentifier!!,
+          softDelete = true,
+        )
+      }
+    }
+  }
+
+  private fun removeGroup(groupId: String, removeGroup: Boolean, deactivateMembers: Boolean) {
+    if (removeGroup) {
+      viewModelScope.launch(dispatcherProvider.io()) {
+        try {
+          defaultRepository.removeGroup(
+            groupId = groupId,
+            isDeactivateMembers = deactivateMembers,
+            configComputedRuleValues = emptyMap(),
+          )
+        } catch (exception: Exception) {
+          Timber.e(exception)
+        }
+      }
+    }
+  }
+
+  private fun removeGroupMember(
+    memberId: String?,
+    groupIdentifier: String?,
+    memberResourceType: ResourceType?,
+    removeMember: Boolean,
+  ) {
+    if (removeMember && !memberId.isNullOrEmpty()) {
+      viewModelScope.launch(dispatcherProvider.io()) {
+        try {
+          defaultRepository.removeGroupMember(
+            memberId = memberId,
+            groupId = groupIdentifier,
+            groupMemberResourceType = memberResourceType,
+            configComputedRuleValues = emptyMap(),
+          )
+        } catch (exception: Exception) {
+          Timber.e(exception)
+        }
+      }
+    }
+  }
+
+  /**
+   * This function searches and returns the latest [QuestionnaireResponse] for the given
+   * [resourceId] that was extracted from the [Questionnaire] identified as [questionnaireId].
+   * Returns null if non is found.
+   */
+  suspend fun searchLatestQuestionnaireResponse(
+    resourceId: String,
+    resourceType: ResourceType,
+    questionnaireId: String,
+  ): QuestionnaireResponse? {
+    val search =
+      Search(ResourceType.QuestionnaireResponse).apply {
+        filter(QuestionnaireResponse.SUBJECT, { value = "$resourceType/$resourceId" })
+        filter(
+          QuestionnaireResponse.QUESTIONNAIRE,
+          { value = "${ResourceType.Questionnaire}/$questionnaireId" },
+        )
+      }
+    val questionnaireResponses: List<QuestionnaireResponse> = defaultRepository.search(search)
+    return questionnaireResponses.maxByOrNull { it.meta.lastUpdated }
+  }
+
+  /**
+   * Return [Resource]s to be used in the launch context of the questionnaire. Launch context allows
+   * information to be passed into questionnaire based on the context in which the questionnaire is
+   * being evaluated. For example, what patient, what encounter, what user, etc. is "in context" at
+   * the time the questionnaire response is being completed:
+   * https://build.fhir.org/ig/HL7/sdc/StructureDefinition-sdc-questionnaire-launchContext.html
+   */
+  suspend fun retrievePopulationResources(actionParameters: List<ActionParameter>): List<Resource> {
+    return actionParameters
+      .filter {
+        it.paramType == ActionParameterType.QUESTIONNAIRE_RESPONSE_POPULATION_RESOURCE &&
+                it.resourceType != null &&
+                it.value.isNotEmpty()
+      }
+      .mapNotNull {
+        try {
+          loadResource(it.resourceType!!, it.value)
+        } catch (resourceNotFoundException: ResourceNotFoundException) {
+          null
+        }
+      }
+  }
+
+  /** Load [Resource] of type [ResourceType] for the provided [resourceIdentifier] */
+  suspend fun loadResource(resourceType: ResourceType, resourceIdentifier: String): Resource? =
+    try {
+      defaultRepository.loadResource(resourceIdentifier, resourceType)
+    } catch (resourceNotFoundException: ResourceNotFoundException) {
+      null
+    }
+
+  /** Update the current progress state of the questionnaire. */
+  fun setProgressState(questionnaireState: QuestionnaireProgressState) {
+    _questionnaireProgressStateLiveData.postValue(questionnaireState)
+  }
+
+  /**
+   * Walks the [questionnaireResponse] tree, materializes the per-image AI result into the sibling
+   * `<linkId>$AI_RESULT_SUFFIX` hidden item, and returns the case-level summary (see
+   * [CaseAggregator] for how photo results combine).
+   *
+   * The contract is structural rather than path-based: any attachment answer carrying AI extensions
+   * is an inference-bearing answer, and any item with the [AI_RESULT_SUFFIX] suffix is its sibling
+   * carrier. Results are read through [AiResultFhirMapper], so drafts saved before the generic
+   * extension existed still summarise.
+   */
+  fun summarizeAiInference(
+    questionnaireResponse: QuestionnaireResponse,
+    questionnaire: Questionnaire? = null,
+  ): AiInferenceSummary {
+    val aggregator = CaseAggregator()
+    val questionnaireItemsByLinkId =
+      questionnaire?.let { mutableMapOf<String, Questionnaire.QuestionnaireItemComponent>() }
+    questionnaire?.item?.let { collectQuestionnaireItems(it, questionnaireItemsByLinkId!!) }
+    try {
+      Timber.d("=== AI inference summary: walking QR ===")
+      forEachQrItemWithSiblings(questionnaireResponse.item) { item, siblings ->
+        if (item.linkId.endsWith(AI_RESULT_SUFFIX)) {
+          val hiddenValue = item.answer.firstOrNull()?.value.asPrimitiveString()
+          Timber.d("AI hidden item linkId=${item.linkId} value=$hiddenValue")
+          val outcome = ImageScreeningResult.outcomeOfLegacyLabel(hiddenValue)
+          if (outcome != null) {
+            val originalLinkId = item.linkId.removeSuffix(AI_RESULT_SUFFIX)
+            val title =
+              siblings
+                .firstOrNull { it.linkId == originalLinkId }
+                ?.answer
+                ?.firstOrNull()
+                ?.let { it.value as? Attachment }
+                ?.title
+            aggregator.addHiddenResult(originalLinkId, outcome, title)
+          }
+          return@forEachQrItemWithSiblings
+        }
+
+        val answer = item.answer.firstOrNull() ?: return@forEachQrItemWithSiblings
+
+        // Only attachment-typed answers carry AI extensions; skip Coding/String/etc. items so
+        // HAPI's typed accessors don't throw.
+        val attachment = answer.value as? Attachment ?: return@forEachQrItemWithSiblings
+
+        // The AI extensions are written by CustomAttachmentViewHolderFactory onto both the QR
+        // answer AND the Questionnaire item. SDC strips the QR answer's extensions on submit, so
+        // the Questionnaire item is the surviving source of truth.
+        val qItem = questionnaireItemsByLinkId?.get(item.linkId)
+        val stored =
+          AiResultFhirMapper.read { url ->
+            answer.getExtensionByUrl(url) ?: qItem?.getExtensionByUrl(url)
+          } ?: return@forEachQrItemWithSiblings
+
+        Timber.d(
+          "AI walk image item linkId=${item.linkId} title=${attachment.title} " +
+            "qrAnswerExtCount=${answer.extension.size} " +
+            "qItemExtCount=${qItem?.extension?.size ?: -1} result=$stored",
+        )
+        aggregator.addPhoto(item.linkId, attachment.title, stored)
+        if (stored.failed) return@forEachQrItemWithSiblings
+
+        siblings
+          .firstOrNull { it.linkId == "${item.linkId}$AI_RESULT_SUFFIX" }
+          ?.let { hiddenItem ->
+            if (hiddenItem.answer.isEmpty()) hiddenItem.addAnswer()
+            hiddenItem.answer[0].value =
+              StringType("${stored.legacyLabel}|${stored.confidencePercentText}")
+          }
+
+        // Mirror onto the QR answer so downstream readers (e.g. StructureMap copy rules) see the
+        // values regardless of whether the SDC-stripped answer extensions are present.
+        AiResultFhirMapper.ALL_URLS.forEach { url ->
+          if (answer.getExtensionByUrl(url) == null) {
+            qItem?.getExtensionByUrl(url)?.let { answer.addExtension(it.copy()) }
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Timber.e(e, "Failed to summarize AI inference results")
+    }
+    return aggregator.summary().also {
+      Timber.d("=== AI inference summary done: %s ===", it)
+    }
+  }
+
+  private fun collectQuestionnaireItems(
+    items: List<Questionnaire.QuestionnaireItemComponent>,
+    out: MutableMap<String, Questionnaire.QuestionnaireItemComponent>,
+  ) {
+    items.forEach { qItem ->
+      qItem.linkId?.let { out[it] = qItem }
+      if (qItem.item.isNotEmpty()) collectQuestionnaireItems(qItem.item, out)
+    }
+  }
+
+  private fun forEachQrItemWithSiblings(
+    items: List<QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    action: (
+      QuestionnaireResponse.QuestionnaireResponseItemComponent,
+      List<QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    ) -> Unit,
+  ) {
+    items.forEach { item ->
+      action(item, items)
+      if (item.item.isNotEmpty()) forEachQrItemWithSiblings(item.item, action)
+      item.answer.forEach { answer ->
+        if (answer.item.isNotEmpty()) forEachQrItemWithSiblings(answer.item, action)
+      }
+    }
+  }
+
+  private fun Base?.asPrimitiveString(): String? =
+    this?.primitiveValue()?.takeIf { it.isNotBlank() } ?: this?.toString()?.takeIf { it.isNotBlank() }
+
+  fun updateReferCase(qrId: String) {
+    viewModelScope.launch(dispatcherProvider.io()) {
+      try {
+        val qr = fhirEngine.get(ResourceType.QuestionnaireResponse, qrId) as QuestionnaireResponse
+        qr.addExtension(REFER_CASE_URL, BooleanType(true))
+        fhirEngine.update(qr)
+        // Skipped when offline; the referral is queued as a local change and rides the next sync.
+        syncBroadcaster.runOneTimeSync()
+      } catch (e: Exception) {
+        Timber.e(e, "Error updating QuestionnaireResponse with refer case")
+      }
+    }
+  }
+
+  companion object {
+    const val CONTAINED_LIST_TITLE = "GeneratedResourcesList"
+    const val AA_REFERENCE_ID_LINK_ID = "aa-reference-id"
+    const val SCREENING_GROUP_LINK_ID = "screening-group"
+    const val PATIENT_SCREENING_IMAGE_GROUP_LINK_ID = "patient-screening-image-group"
+
+    /** The patient's first name — the minimum the user must enter for a draft to be worth keeping. */
+    const val PATIENT_GIVEN_NAME_LINK_ID = "patient-name-given"
+    const val PATIENT_REFERENCE_ID_SYSTEM = "${CanonicalUrls.IDENTIFIER}/patient-id"
+    const val OUTPUT_PARAMETER_KEY = "OUTPUT"
+
+    /** https://hl7.org/fhir/R4/extension-questionnaire-hidden.html */
+    private const val EXTENSION_HIDDEN_URL =
+      "http://hl7.org/fhir/StructureDefinition/questionnaire-hidden"
+
+    /**
+     * Elements every extracted resource carries whether or not the user entered anything, so their
+     * presence says nothing about whether the extraction worked — see [carriesOnlyBookkeeping].
+     */
+    private val BOOKKEEPING_ELEMENTS =
+      setOf(
+        "id",
+        "meta",
+        "implicitRules",
+        "language",
+        "text",
+        "contained",
+        "extension",
+        "modifierExtension",
+        "identifier",
+      )
+  }
+}
+
+/**
+ * A required question of the [Questionnaire] that the [QuestionnaireResponse] does not answer.
+ *
+ * @property linkId the questionnaire item's linkId, for logs and analytics.
+ * @property label the question as the user saw it, for the message that names what is missing.
+ */
+data class UnansweredRequiredQuestion(
+  val linkId: String,
+  val label: String,
+)
+
+/**
+ * Outcome of [QuestionnaireViewModel.reconcileDocumentReferencesForSubmission].
+ *
+ * @property submittedDraftIds ids of DocumentReferences flipped DRAFT -> SUBMITTED.
+ * @property missingReferences answers dropped because their DocumentReference is absent locally
+ *   *and* was never confirmed on the server — the ids that would have produced a 404.
+ * @property unparseableUrls attachment URLs from which no DocumentReference id could be extracted.
+ * @property uploadedButPurgedIds ids absent locally but recorded as uploaded, whose answers were
+ *   deliberately kept because the server holds the resource.
+ * @property failedFlips documents that could not be read or could not be flipped to SUBMITTED.
+ *   These stay invisible to `AppSyncWorker` (which skips DRAFT), so their images are never
+ *   uploaded — the response ends up referencing a resource with no binary.
+ */
+data class DocumentReferenceReconciliationResult(
+  val submittedDraftIds: List<String> = emptyList(),
+  val missingReferences: List<MissingDocumentReference> = emptyList(),
+  val unparseableUrls: List<String> = emptyList(),
+  val uploadedButPurgedIds: List<String> = emptyList(),
+  val failedFlips: List<MissingDocumentReference> = emptyList(),
+)
+
+/** A screening-image answer whose DocumentReference is absent from the local FhirEngine. */
+data class MissingDocumentReference(
+  val linkId: String,
+  val documentReferenceId: String,
+)

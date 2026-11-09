@@ -1,0 +1,2088 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.register.patients
+
+import android.os.SystemClock
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.util.fastAny
+import androidx.compose.ui.util.fastDistinctBy
+import androidx.compose.ui.util.fastFilter
+import androidx.compose.ui.util.fastForEach
+import androidx.compose.ui.util.fastMap
+import androidx.compose.ui.util.fastMapIndexedNotNull
+import androidx.compose.ui.util.fastMapNotNull
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
+import androidx.paging.filter
+import ca.uhn.fhir.context.FhirContext
+import ca.uhn.fhir.parser.IParser
+import ca.uhn.fhir.rest.gclient.ReferenceClientParam
+import ca.uhn.fhir.rest.gclient.StringClientParam
+import ca.uhn.fhir.rest.gclient.TokenClientParam
+import com.google.android.fhir.FhirEngine
+import com.google.android.fhir.datacapture.extensions.asStringValue
+import com.google.android.fhir.db.ResourceNotFoundException
+import com.google.android.fhir.search.Order
+import com.google.android.fhir.search.search
+import com.google.android.fhir.sync.SyncDataParams
+import com.google.gson.Gson
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.hl7.fhir.r4.model.CodeableConcept
+import org.hl7.fhir.r4.model.Coding
+import org.hl7.fhir.r4.model.DocumentReference
+import org.hl7.fhir.r4.model.Encounter
+import org.hl7.fhir.r4.model.Enumerations.DataType
+import org.hl7.fhir.r4.model.Media
+import org.hl7.fhir.r4.model.Meta
+import org.hl7.fhir.r4.model.Patient
+import org.hl7.fhir.r4.model.QuestionnaireResponse
+import org.hl7.fhir.r4.model.Resource
+import org.hl7.fhir.r4.model.ResourceType
+import org.hl7.fhir.r4.model.Task
+import org.hl7.fhir.r4.model.Task.TaskStatus
+import org.json.JSONException
+import org.json.JSONObject
+import org.smartregister.fhircore.engine.configuration.ConfigType
+import org.smartregister.fhircore.engine.configuration.ConfigurationRegistry
+import org.smartregister.fhircore.engine.configuration.register.RegisterConfiguration
+import org.smartregister.fhircore.engine.configuration.register.RegisterFilterField
+import org.smartregister.fhircore.engine.configuration.workflow.ActionTrigger
+import org.smartregister.fhircore.engine.data.local.register.RegisterRepository
+import org.smartregister.fhircore.engine.domain.model.ActionParameter
+import org.smartregister.fhircore.engine.domain.model.Code
+import org.smartregister.fhircore.engine.domain.model.DataQuery
+import org.smartregister.fhircore.engine.domain.model.FhirResourceConfig
+import org.smartregister.fhircore.engine.domain.model.FilterCriterionConfig
+import org.smartregister.fhircore.engine.domain.model.ResourceConfig
+import org.smartregister.fhircore.engine.domain.model.ResourceData
+import org.smartregister.fhircore.engine.domain.model.SnackBarMessageConfig
+import org.smartregister.fhircore.engine.rulesengine.ResourceDataRulesExecutor
+import org.smartregister.fhircore.engine.sync.AppSyncWorker
+import org.smartregister.fhircore.engine.util.DispatcherProvider
+import org.smartregister.fhircore.engine.util.SecureSharedPreference
+import org.smartregister.fhircore.engine.util.SharedPreferenceKey
+import org.smartregister.fhircore.engine.util.SharedPreferencesHelper
+import org.smartregister.fhircore.engine.util.extension.daysPassed
+import org.smartregister.fhircore.engine.util.extension.encodeJson
+import org.smartregister.fhircore.engine.util.extension.extractLogicalIdUuid
+import org.smartregister.fhircore.engine.util.extension.isIn
+import org.smartregister.fhircore.engine.util.extension.isInCurrentMonth
+import org.smartregister.fhircore.engine.util.extension.isInCurrentWeek
+import org.smartregister.fhircore.engine.util.extension.isToday
+import org.smartregister.fhircore.engine.util.extension.logicalId
+import org.smartregister.fhircore.engine.util.extension.monthsPassed
+import org.smartregister.fhircore.engine.util.extension.valueToString
+import org.smartregister.fhircore.quest.BuildConfig
+import org.smartregister.fhircore.quest.data.register.RegisterPagingSource
+import org.smartregister.fhircore.quest.data.register.model.RegisterPagingSourceState
+import org.smartregister.fhircore.quest.ui.login.UserSwitchManager
+import org.smartregister.fhircore.quest.ui.main.AppMainEvent
+import org.smartregister.fhircore.quest.ui.questionnaire.QuestionnaireViewModel
+import org.smartregister.fhircore.quest.ui.register.tasks.TaskCodes
+import org.smartregister.fhircore.engine.util.FeatureFlagUtil
+import org.smartregister.fhircore.quest.util.DraftsUtils.getAllDraftsJsonFromSharedPreferences
+import org.smartregister.fhircore.quest.util.DraftsUtils.parseDraftResponses
+import org.smartregister.fhircore.quest.util.DraftsUtils.removeDraftFromBundle
+import org.smartregister.fhircore.quest.util.DraftsUtils.saveBundleToSharedPreferences
+import org.smartregister.fhircore.quest.util.OpensrpDateUtils.convertToDateStringToDate
+import org.smartregister.fhircore.quest.util.PostHogAnalytics
+import org.smartregister.fhircore.quest.util.TaskProgressState
+import org.smartregister.fhircore.quest.util.AiReadiness
+import org.smartregister.fhircore.quest.ml.ScreeningEngine
+import org.smartregister.fhircore.quest.util.AiStatus
+import org.smartregister.fhircore.quest.util.aiReadiness
+import org.smartregister.fhircore.quest.util.aiStatus
+import org.smartregister.fhircore.quest.util.dailog.ForegroundSyncDialogState
+import org.smartregister.fhircore.quest.util.extensions.toParamDataMap
+import org.smartregister.model.practitioner.FhirPractitionerDetails
+import timber.log.Timber
+import java.time.LocalDate
+import java.util.Date
+import java.util.UUID
+import javax.inject.Inject
+
+/** Number of patients fetched for the register's quick first-paint preview (matches the home UI). */
+private const val PATIENT_PREVIEW_COUNT = 3
+
+/** Number of cases checked for sync status at a time - roughly what's visible on screen at once. */
+private const val VISIBLE_SYNC_STATUS_CHECK_COUNT = 5
+
+/** Long enough for the questionnaire to cover the screen, short enough not to feel stuck. */
+private const val CASE_LAUNCH_DEBOUNCE_MS = 1_000L
+private const val RETRY_DEBOUNCE_MS = 1_000L
+private const val AI_CHECK_TIMEOUT_MS = 10_000L
+private const val NEVER = Long.MIN_VALUE / 2
+
+@HiltViewModel
+class RegisterViewModel
+@Inject
+constructor(
+    val registerRepository: RegisterRepository,
+    val configurationRegistry: ConfigurationRegistry,
+    val sharedPreferencesHelper: SharedPreferencesHelper,
+    val dispatcherProvider: DispatcherProvider,
+    val secureSharedPreference: SecureSharedPreference,
+    val resourceDataRulesExecutor: ResourceDataRulesExecutor,
+    val fhirEngine: FhirEngine,
+    val featureFlagUtil: FeatureFlagUtil,
+    private val userSwitchManager: UserSwitchManager,
+    // Which AI model this install carries. Null only in tests that predate it, which then behave as
+    // if a model were installed (the only case before models became pluggable).
+    private val screeningEngine: ScreeningEngine? = null,
+) : ViewModel() {
+
+    private val _snackBarStateFlow = MutableSharedFlow<SnackBarMessageConfig>()
+    val snackBarStateFlow = _snackBarStateFlow.asSharedFlow()
+    val registerUiState = mutableStateOf(RegisterUiState())
+    val currentPage: MutableState<Int> = mutableIntStateOf(0)
+    val searchText = mutableStateOf("")
+    val paginatedRegisterData: MutableStateFlow<Flow<PagingData<ResourceData>>> =
+        MutableStateFlow(emptyFlow())
+    val pagesDataCache = mutableMapOf<Int, Flow<PagingData<ResourceData>>>()
+    val registerFilterState = mutableStateOf(RegisterFilterState())
+
+    private lateinit var registerConfiguration: RegisterConfiguration
+    private var allPatientRegisterData: Flow<PagingData<ResourceData>>? = null
+    private val _percentageProgress: MutableSharedFlow<Int> = MutableSharedFlow(0)
+    private val _isUploadSync: MutableSharedFlow<Boolean> = MutableSharedFlow(0)
+
+    private val _dashboardDataStateFlow =
+        MutableStateFlow<DashboardData>(DashboardData("", "", "", ""))
+    val dashboardDataStateFlow: StateFlow<DashboardData> = _dashboardDataStateFlow
+
+    private val _allLatestTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val allLatestTasksStateFlow: StateFlow<List<TaskItem>> = _allLatestTasksStateFlow
+
+    private val _filteredTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val filteredTasksStateFlow: StateFlow<List<TaskItem>> = _filteredTasksStateFlow
+
+    private val _searchedTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val searchedTasksStateFlow: StateFlow<List<TaskItem>> = _searchedTasksStateFlow
+
+
+    private val _newTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val newTasksStateFlow: StateFlow<List<TaskItem>> = _newTasksStateFlow
+
+    private val _pendingTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val pendingTasksStateFlow: StateFlow<List<TaskItem>> = _pendingTasksStateFlow
+
+    private val _completedTasksStateFlow = MutableStateFlow<List<TaskItem>>(emptyList())
+    val completedTasksStateFlow: StateFlow<List<TaskItem>> = _completedTasksStateFlow
+
+    private val _allPatientsStateFlow = MutableStateFlow<List<AllPatientsResourceData>>(emptyList())
+    val allPatientsStateFlow: StateFlow<List<AllPatientsResourceData>> = _allPatientsStateFlow
+
+    private val _homeScreenPatientsStateFlow = MutableStateFlow<List<AllPatientsResourceData>>(emptyList())
+    val homeScreenPatientsStateFlow: StateFlow<List<AllPatientsResourceData>> = _homeScreenPatientsStateFlow
+
+    // Per-case sync status (Patient metadata + its screening images), keyed by Patient logical id.
+    // Absent from the map == not yet checked, which the card renders as "pending" until proven
+    // synced. Only computed for a handful of visible cards at a time (see [refreshCaseSyncStatus]).
+    private val _caseSyncStatusStateFlow = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val caseSyncStatusStateFlow: StateFlow<Map<String, Boolean>> = _caseSyncStatusStateFlow
+
+    private val _allTaskCodeWithValues = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val allTaskCodeWithValues: StateFlow<List<Pair<String, String>>> = _allTaskCodeWithValues
+
+    private val _isFetching = MutableStateFlow<Boolean>(false)
+    val isFetching: StateFlow<Boolean> = _isFetching
+
+    // Loading flag scoped to the register/home patients list only. Unlike [isFetching] (which is
+    // shared by several concurrent loaders), this reflects exactly the data the home screen shows,
+    // so its spinner clears as soon as the cases are ready instead of waiting on unrelated loads.
+    private val _isFetchingPatients = MutableStateFlow<Boolean>(false)
+    val isFetchingPatients: StateFlow<Boolean> = _isFetchingPatients
+
+
+    private val _isFetchingTasks = MutableStateFlow<Boolean>(false)
+    val isFetchingTasks: StateFlow<Boolean> = _isFetchingTasks
+
+    private val _isShowPendingSyncBanner = MutableStateFlow<Boolean>(false)
+    val isShowPendingSyncBanner: StateFlow<Boolean> = _isShowPendingSyncBanner
+
+
+    private val _isLogout = MutableStateFlow<Boolean>(false)
+    val isLogout: StateFlow<Boolean> = _isLogout
+
+    /**
+     * Cases still to sync, for the "pending to sync" logout dialog; null while it is hidden. 0 means
+     * something other than a case (e.g. only photos) is pending.
+     */
+    private val _logoutPendingSyncCaseCount = MutableStateFlow<Int?>(null)
+    val logoutPendingSyncCaseCount: StateFlow<Int?> = _logoutPendingSyncCaseCount
+    private var logoutCheckJob: Job? = null
+
+    private val _allSyncedPatientsStateFlow =
+        MutableStateFlow<List<AllPatientsResourceData>>(emptyList())
+    val allSyncedPatientsStateFlow: StateFlow<List<AllPatientsResourceData>> =
+        _allSyncedPatientsStateFlow
+
+    private val _allSavedDraftResponseStateFlow =
+        MutableStateFlow<List<QuestionnaireResponse>>(emptyList())
+    val allSavedDraftResponse: StateFlow<List<QuestionnaireResponse>> =
+        _allSavedDraftResponseStateFlow
+
+    private val _allUnSyncedStateFlow = MutableStateFlow<List<Patient2>>(emptyList())
+    val allUnSyncedStateFlow: StateFlow<List<Patient2>> = _allUnSyncedStateFlow
+
+    private var _allUnSyncedImages = MutableStateFlow<Int>(0)
+    val allUnSyncedImages: StateFlow<Int> = _allUnSyncedImages
+
+    private val _foregroundSyncDialogState =
+        MutableStateFlow<ForegroundSyncDialogState>(ForegroundSyncDialogState.Loading)
+    val foregroundSyncDialogState: StateFlow<ForegroundSyncDialogState> =
+        _foregroundSyncDialogState
+    private var foregroundSyncStatusRefreshJob: Job? = null
+
+    /** Whether a sync worker is running right now, for the toolbar's active-sync indicator. */
+    val isSyncRunning: StateFlow<Boolean> = AppSyncWorker.isSyncRunning
+
+    private var _showDialog = mutableStateOf(false)
+    val showDialog: State<Boolean> = _showDialog
+    private var syncStateWatchJob: Job? = null
+
+    private var _permissionGranted = mutableStateOf(false)
+    val permissionGranted: State<Boolean> = _permissionGranted
+
+    var appMainEvent: AppMainEvent? = null
+
+    // Gate for adding cases. Only one situation blocks: the site has AI on (feature flag) but this
+    // device's registration StructureMap cannot extract the AI result, so the case would silently lose
+    // it. Sites that run with AI off add cases as usual. See AiReadiness; users only ever see "AI".
+
+    private var _showAiEnableFailedDialog = mutableStateOf(false)
+    val showAiEnableFailedDialog: State<Boolean> = _showAiEnableFailedDialog
+
+    /** Clock for the tap debounces; replaced in tests. */
+    internal var elapsedRealtime: () -> Long = SystemClock::elapsedRealtime
+    private var aiCheckInFlight = false
+    private var lastCaseLaunchAt = NEVER
+    private var lastAiRetryAt = NEVER
+
+    /** AI was last seen needing an update, so the sync that completes it gets announced. */
+    private var aiEnablePending = false
+
+    /** The user tapped Retry; if the sync that follows still leaves AI needing an update, the dialog comes back. */
+    private var aiRetryAwaitingSync = false
+
+    /**
+     * [AiReadiness] for cases registered with [questionnaireId]. An error or a read that hangs (the
+     * flag read falls back to the network when the device has no local copy) counts as
+     * [AiReadiness.UPDATE_NEEDED]: registering a case without its AI result is what this prevents, and
+     * the flag is normally read from the device in milliseconds.
+     */
+    suspend fun aiReadiness(questionnaireId: String): AiReadiness =
+        try {
+            withTimeoutOrNull(AI_CHECK_TIMEOUT_MS) {
+                withContext(dispatcherProvider.io()) {
+                    fhirEngine.aiReadiness(
+                        featureFlagUtil,
+                        questionnaireId,
+                        aiModelSelected = screeningEngine?.status()?.isSelected ?: true,
+                    )
+                }
+            } ?: AiReadiness.UPDATE_NEEDED.also { Timber.w("AI readiness check timed out for $questionnaireId") }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            Timber.e(exception, "AI readiness check failed for $questionnaireId")
+            AiReadiness.UPDATE_NEEDED
+        }
+
+    /** The questionnaire behind the register's "Add new case" action, or null if it can't be read. */
+    fun registrationQuestionnaireId(registerId: String): String? =
+        try {
+            registrationQuestionnaireId(retrieveRegisterConfiguration(registerId))
+        } catch (exception: Exception) {
+            Timber.w(exception, "Could not resolve the registration questionnaire for $registerId")
+            null
+        }
+
+    fun registrationQuestionnaireId(registerConfiguration: RegisterConfiguration?): String? =
+        try {
+            registerConfiguration
+                ?.noResults
+                ?.actionButton
+                ?.actions
+                ?.find { it.trigger.isIn(ActionTrigger.ON_CLICK, ActionTrigger.ON_QUESTIONNAIRE_SUBMISSION) }
+                ?.interpolate(emptyMap())
+                ?.questionnaire
+                ?.interpolate(emptyMap())
+                ?.id
+                ?.takeIf { it.isNotBlank() }
+        } catch (exception: Exception) {
+            Timber.w(exception, "Could not resolve the registration questionnaire")
+            null
+        }
+
+    /**
+     * The profile screen's "AI … + Extraction …" label for the register's registration form, or null
+     * when it cannot be worked out (registration form not configured, or the check failed or hung),
+     * in which case the label is left out rather than showing a guess.
+     */
+    suspend fun aiStatusForRegister(registerId: String): AiStatus? {
+        val questionnaireId = registrationQuestionnaireId(registerId) ?: return null
+        return try {
+            withTimeoutOrNull(AI_CHECK_TIMEOUT_MS) {
+                withContext(dispatcherProvider.io()) {
+                    fhirEngine.aiStatus(featureFlagUtil, questionnaireId, screeningEngine?.status())
+                }
+            }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            Timber.e(exception, "AI status check failed for $questionnaireId")
+            null
+        }
+    }
+
+    /**
+     * Gate for every "add a new case" entry point: runs [onAllowed] unless AI is on for the site but
+     * the device cannot extract the AI result ([AiReadiness.UPDATE_NEEDED]), in which case it opens the
+     * "Failed to enable AI" dialog instead. Sites with AI off are never blocked. Taps are ignored
+     * while a check is running and for [CASE_LAUNCH_DEBOUNCE_MS] after a launch, so neither a double
+     * tap nor a tap that lands before the form covers the screen opens it twice.
+     *
+     * Suspends in the caller's scope (the fragment's view lifecycle) so [onAllowed] never runs
+     * against a destroyed screen.
+     */
+    suspend fun launchIfAiUpToDate(questionnaireId: String, onAllowed: () -> Unit) {
+        if (aiCheckInFlight || elapsedRealtime() - lastCaseLaunchAt < CASE_LAUNCH_DEBOUNCE_MS) return
+        aiCheckInFlight = true
+        try {
+            if (aiReadiness(questionnaireId) == AiReadiness.UPDATE_NEEDED) {
+                Timber.w("AI is on but $questionnaireId cannot extract the AI result; add case blocked")
+                PostHogAnalytics.capture(
+                    PostHogAnalytics.Events.ADD_CASE_BLOCKED_AI_EXTRACTION_MISSING,
+                    mapOf("questionnaire_id" to questionnaireId),
+                )
+                aiEnablePending = true
+                _showAiEnableFailedDialog.value = true
+            } else {
+                aiEnablePending = false
+                lastCaseLaunchAt = elapsedRealtime()
+                onAllowed()
+            }
+        } finally {
+            aiCheckInFlight = false
+        }
+    }
+
+    /**
+     * Retry on the "Failed to enable AI" dialog. Returns true when the caller should start a sync.
+     * A repeated tap returns false, and so does a tap while offline — the dialog stays open and
+     * already says that enabling AI needs the internet.
+     */
+    fun onAiEnableRetry(isOnline: Boolean): Boolean {
+        val now = elapsedRealtime()
+        if (now - lastAiRetryAt < RETRY_DEBOUNCE_MS) return false
+        lastAiRetryAt = now
+        if (!isOnline) return false
+        _showAiEnableFailedDialog.value = false
+        aiEnablePending = true
+        aiRetryAwaitingSync = true
+        return true
+    }
+
+    fun dismissAiEnableFailedDialog() {
+        _showAiEnableFailedDialog.value = false
+    }
+
+    /**
+     * Records whether AI needs an update before any sync runs, so the sync that completes it can be
+     * announced even when the user has not tried to add a case yet.
+     */
+    suspend fun refreshAiEnabledState(questionnaireId: String) {
+        if (aiCheckInFlight) return
+        aiEnablePending = aiReadiness(questionnaireId) == AiReadiness.UPDATE_NEEDED
+    }
+
+    /**
+     * Call when a sync finishes. Returns true when AI needed an update before and this sync enabled
+     * it, so the screen can tell the user. A sync that switched the site's AI off settles it too, with
+     * nothing to announce. If the user had tapped Retry and AI still needs an update, the dialog comes
+     * back.
+     */
+    suspend fun reconcileAiAfterSync(questionnaireId: String?): Boolean {
+        val retried = aiRetryAwaitingSync
+        aiRetryAwaitingSync = false
+        if (!aiEnablePending || questionnaireId == null) return false
+        return when (aiReadiness(questionnaireId)) {
+            AiReadiness.READY -> {
+                aiEnablePending = false
+                PostHogAnalytics.capture(
+                    PostHogAnalytics.Events.AI_ENABLED_AFTER_SYNC,
+                    mapOf("questionnaire_id" to questionnaireId, "after_retry" to retried),
+                )
+                true
+            }
+            AiReadiness.DISABLED -> {
+                aiEnablePending = false
+                false
+            }
+            AiReadiness.UPDATE_NEEDED -> {
+                if (retried) _showAiEnableFailedDialog.value = true
+                false
+            }
+        }
+    }
+
+    //var imageCount = 0
+    //var unsyncedPatientsCount = 0
+
+    /**
+     * This function paginates the register data. An optional [clearCache] resets the data in the
+     * cache (this is necessary after a questionnaire has been submitted to refresh the register with
+     * new/updated data).
+     */
+    fun paginateRegisterData(
+        registerId: String,
+        loadAll: Boolean = false,
+        clearCache: Boolean = false,
+    ) {
+        if (clearCache) {
+            pagesDataCache.clear()
+            allPatientRegisterData = null
+        }
+        paginatedRegisterData.value =
+            pagesDataCache.getOrPut(currentPage.value) {
+                getPager(registerId, loadAll).flow.cachedIn(viewModelScope)
+            }
+    }
+
+    //48h
+    fun isShowPendingSyncBanner(){
+        _isShowPendingSyncBanner.value = secureSharedPreference.getLastSyncDataTime() > 0 &&
+                (System.currentTimeMillis() - secureSharedPreference.getLastSyncDataTime() > 1000 * 60 * 60 * 48)
+    }
+
+    fun setPostHogUserProperties() {
+        try {
+            val flwId = secureSharedPreference.getPractitionerUserId()
+            val pendingImages = _allUnSyncedImages.value
+            val pendingCases = _allUnSyncedStateFlow.value.size
+            PostHogAnalytics.identifyUser(
+                flwId = flwId,
+                pendingSyncImages = pendingImages,
+                pendingSyncCases = pendingCases,
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "PostHog setUserProperties failed")
+        }
+    }
+
+    suspend fun updatePractitionerIdInLocalChanges() {
+        if(secureSharedPreference.getPractitionerIdIssueMigrated()){
+            return
+        }
+        // Initialize FHIR context and JSON parser
+        val fhirContext = FhirContext.forR4()
+        val jsonParser: IParser = fhirContext.newJsonParser()
+
+        // Get the correct practitioner ID
+        val correctPractitionerId = secureSharedPreference.getPractitionerUserId()
+            ?: throw IllegalStateException("Practitioner ID not found in secureSharedPreference")
+
+        // Validate practitioner ID (ensure it's not empty and is lowercase)
+        if (correctPractitionerId.isEmpty()) {
+            throw IllegalStateException("Practitioner ID is empty")
+        }
+        val normalizedPractitionerId = correctPractitionerId.lowercase()
+
+        // Retrieve unsynced local changes
+        val localChanges = fhirEngine.getUnsyncedLocalChanges()
+
+        withContext(Dispatchers.IO) {
+            localChanges.forEach { localChange ->
+                try {
+                    // Parse the payload into a Resource
+                    val resource = jsonParser.parseResource(localChange.payload)
+
+                    // Flag to track if resource was updated
+                    var updated = false
+
+                    when (resource) {
+                        is Patient -> {
+                            // Update generalPractitioner references
+                            resource.generalPractitioner?.forEach { reference ->
+                                if (shouldUpdateReference(reference.reference)) {
+                                    reference.reference = "Practitioner/$normalizedPractitionerId"
+                                    updated = true
+                                }
+                            }
+                        }
+                        is Encounter -> {
+                            // Update participant references
+                            resource.participant?.forEach { participant ->
+                                if (shouldUpdateReference(participant.individual?.reference)) {
+                                    participant.individual = org.hl7.fhir.r4.model.Reference("Practitioner/$normalizedPractitionerId")
+                                    updated = true
+                                }
+                            }
+                        }
+                        is Media -> {
+                            // Update operator reference
+                            if (shouldUpdateReference(resource.operator?.reference)) {
+                                resource.operator = org.hl7.fhir.r4.model.Reference("Practitioner/$normalizedPractitionerId")
+                                updated = true
+                            }
+                        }
+                        is QuestionnaireResponse -> {
+                            // Update author reference
+                            if (shouldUpdateReference(resource.author?.reference)) {
+                                resource.author = org.hl7.fhir.r4.model.Reference("Practitioner/$normalizedPractitionerId")
+                                updated = true
+                            }
+                        }
+                    }
+
+                    // If resource was updated, save it back to the FHIR Engine
+                    if (updated) {
+                        fhirEngine.update(resource as Resource)
+                    }
+                } catch (e: Exception) {
+                    // Log error for debugging
+                    e.printStackTrace()
+                }
+            }
+        }
+        secureSharedPreference.practitionerIdIssueMigrated(true)
+    }
+
+    // Helper function to determine if a reference needs updating
+    private fun shouldUpdateReference(reference: String?): Boolean {
+        if (reference.isNullOrEmpty()) return true
+        val practitionerId = reference.substringAfter("Practitioner/", "")
+        return practitionerId.isEmpty() || practitionerId != practitionerId.lowercase()
+    }
+
+    /**
+     * Logout from the profile. With everything synced the user is logged out straight away and a
+     * different user may log in next; otherwise the pending-sync dialog asks them to sync first.
+     */
+    fun onLogoutClicked() {
+        if (logoutCheckJob?.isActive == true) return
+        logoutCheckJob =
+            viewModelScope.launch {
+                val pending =
+                    try {
+                        userSwitchManager.pendingSyncSummary()
+                    } catch (exception: CancellationException) {
+                        throw exception
+                    } catch (exception: Exception) {
+                        // Cannot tell what is unsynced, so treat it as pending rather than risk it.
+                        Timber.e(exception, "Could not check pending sync before logout")
+                        null
+                    }
+                if (pending != null && !pending.hasPendingData) {
+                    logout(fullySynced = true)
+                } else {
+                    _logoutPendingSyncCaseCount.value = pending?.caseCount ?: 0
+                }
+            }
+    }
+
+    fun dismissLogoutPendingSync() {
+        _logoutPendingSyncCaseCount.value = null
+    }
+
+    /**
+     * Ends the session. Only a [fullySynced] logout lets a different user log in next; any other
+     * logout keeps the device to the same user so their unsynced data is not lost.
+     */
+    fun logout(fullySynced: Boolean = false) {
+        _logoutPendingSyncCaseCount.value = null
+        userSwitchManager.onLogout(fullySynced)
+        _isLogout.value = true
+    }
+
+    private fun getPager(registerId: String, loadAll: Boolean = false): Pager<Int, ResourceData> {
+        val currentRegisterConfigs = retrieveRegisterConfiguration(registerId)
+        val ruleConfigs = currentRegisterConfigs.registerCard.rules
+        val pageSize = currentRegisterConfigs.pageSize // Default 10
+
+        return Pager(
+            config = PagingConfig(pageSize = pageSize, enablePlaceholders = false),
+            pagingSourceFactory = {
+                RegisterPagingSource(
+                    registerRepository = registerRepository,
+                    resourceDataRulesExecutor = resourceDataRulesExecutor,
+                    ruleConfigs = ruleConfigs,
+                    fhirResourceConfig = registerFilterState.value.fhirResourceConfig,
+                    actionParameters = registerUiState.value.params,
+                )
+                    .apply {
+                        setPatientPagingSourceState(
+                            RegisterPagingSourceState(
+                                registerId = registerId,
+                                loadAll = loadAll,
+                                currentPage = if (loadAll) 0 else currentPage.value,
+                            ),
+                        )
+                    }
+            },
+        )
+    }
+
+    fun retrieveRegisterConfiguration(
+        registerId: String,
+        paramMap: Map<String, String>? = emptyMap(),
+    ): RegisterConfiguration {
+        // Ensures register configuration is initialized once
+        if (!::registerConfiguration.isInitialized) {
+            registerConfiguration =
+                configurationRegistry.retrieveConfiguration(
+                    ConfigType.Register,
+                    registerId,
+                    paramMap
+                )
+        }
+        return registerConfiguration
+    }
+
+    private fun retrieveAllPatientRegisterData(registerId: String): Flow<PagingData<ResourceData>> {
+        // Ensure that we only initialize this flow once
+        if (allPatientRegisterData == null) {
+            allPatientRegisterData = getPager(registerId, true).flow.cachedIn(viewModelScope)
+        }
+        return allPatientRegisterData!!
+    }
+
+    fun onEvent(event: RegisterEvent) =
+        when (event) {
+            // Search using name or patient logicalId or identifier. Modify to add more search params
+            is RegisterEvent.SearchRegister -> {
+                searchText.value = event.searchText
+                if (event.searchText.isEmpty()) {
+                    paginateRegisterData(registerUiState.value.registerId)
+                } else {
+                    filterRegisterData(event)
+                }
+            }
+
+            is RegisterEvent.MoveToNextPage -> {
+                currentPage.value = currentPage.value.plus(1)
+                paginateRegisterData(registerUiState.value.registerId)
+            }
+
+            is RegisterEvent.MoveToPreviousPage -> {
+                currentPage.value.let { if (it > 0) currentPage.value = it.minus(1) }
+                paginateRegisterData(registerUiState.value.registerId)
+            }
+
+            else -> {
+
+            }
+        }
+
+    fun filterRegisterData(event: RegisterEvent.SearchRegister) {
+        val searchBar = registerUiState.value.registerConfiguration?.searchBar
+        // computedRules (names of pre-computed rules) must be provided for search to work.
+        if (searchBar?.computedRules != null) {
+            paginatedRegisterData.value =
+                retrieveAllPatientRegisterData(registerUiState.value.registerId).map { pagingData: PagingData<ResourceData> ->
+                    pagingData.filter { resourceData: ResourceData ->
+                        searchBar.computedRules!!.any { ruleName ->
+                            // if ruleName not found in map return {-1}; check always return false hence no data
+                            val value =
+                                resourceData.computedValuesMap[ruleName]?.toString() ?: "{-1}"
+                            value.contains(other = event.searchText, ignoreCase = true)
+                        }
+                    }
+                }
+        }
+    }
+
+    fun updateTask(task: Task, status: TaskStatus, taskOutput: TaskProgressState) {
+        viewModelScope.launch(Dispatchers.IO) {
+
+            val value = CodeableConcept()
+            value.text = taskOutput.text
+
+            task.status = status
+            task.output = listOf(
+                Task.TaskOutputComponent(
+                    CodeableConcept(),
+                    value,
+                ),
+            )
+            fhirEngine.update(task)
+            getAllTasks()
+        }
+    }
+
+    private fun getPractitionerDetails(): FhirPractitionerDetails? {
+        return sharedPreferencesHelper.read<FhirPractitionerDetails>(
+            key = SharedPreferenceKey.PRACTITIONER_DETAILS.name,
+            decodeWithGson = true,
+        )
+    }
+
+
+    /**
+     * @param showLoader false refreshes the lists in place. The full-screen loader replaces the
+     * whole list, so a refresh the user did not ask for (one after a sync) should not raise it.
+     */
+    fun getAllTasks(showLoader: Boolean = true) {
+        if (showLoader) _isFetchingTasks.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val practitionerDetails = getPractitionerDetails()
+            val practitionerId = practitionerDetails?.id.toString().substringAfterLast("/")
+
+            val userName = getUserName()
+            // Fetch tasks and patients in parallel
+            val tasksDeferred = async { fhirEngine.search<Task> { } }
+            val patientsDeferred = async {
+                fhirEngine.search<Patient> {
+                    filter(ReferenceClientParam("general-practitioner"), { value = "Practitioner/$userName" })
+                }
+            }
+
+            val allTasks = tasksDeferred.await().fastMap { it.resource }
+            val patients = patientsDeferred.await().fastMap { it.resource.toResourceData() }
+                .associateBy { it.patient?.logicalId } // Use associateBy to create map with ID as key
+
+            val tasksWithPatient = allTasks.fastMapNotNull { task ->
+
+                val taskOwnerId = task.owner?.reference?.toString()?.substringAfterLast("/") ?: ""
+                val patientId = task?.`for`?.reference?.toString()?.substringAfter("/")
+                    ?: return@fastMapNotNull null
+                if (taskOwnerId == practitionerId && task.status != TaskStatus.REJECTED && patients.containsKey(
+                        patientId
+                    )
+                ) {
+                    TaskItem(task = task, patient = patients[patientId]?.patient)
+                } else {
+                    null
+                }
+            }.fastDistinctBy { it.task.logicalId }
+
+            _newTasksStateFlow.value =
+                tasksWithPatient.fastFilter { it.task.status == TaskStatus.REQUESTED }
+                    .sortedByDescending { it.task.meta.lastUpdated }
+
+            _pendingTasksStateFlow.value =
+                tasksWithPatient.fastFilter { it.task.status == TaskStatus.INPROGRESS }
+                    .sortedByDescending { it.task.meta.lastUpdated }
+
+            _completedTasksStateFlow.value =
+                tasksWithPatient.fastFilter { it.task.status == TaskStatus.COMPLETED }
+                    .sortedByDescending { it.task.meta.lastUpdated }
+
+            val allCodeAndDisplay = tasksWithPatient.fastMapNotNull { taskWithPatient ->
+                getTaskCodeWithValue(taskWithPatient)
+            }.flatten().distinct()
+
+            _allTaskCodeWithValues.value = allCodeAndDisplay
+            println("allCodeAndDisplay --> ${Gson().toJson(allCodeAndDisplay)}")
+
+            _isFetchingTasks.value = false
+        }
+    }
+
+    private var previousCode = ""
+    internal fun getTaskCodeWithValue(taskWithPatient: TaskItem): List<Pair<String, String>>? {
+        return taskWithPatient.task.input?.fastMapIndexedNotNull { index, input ->
+            var codes = input.value?.getNamedProperty("code")?.values?.fastMapNotNull { code ->
+                code.valueToString()
+            }
+
+            var displays = input.value?.getNamedProperty("display")?.values?.fastMapNotNull { display ->
+                display.valueToString()
+            }
+
+            if (codes == null && displays == null) {
+                val data = input.value.valueToString()
+                if (previousCode.isEmpty()) {
+                    val taskCode = TaskCodes.fromCode(data)
+                    val code = taskCode?.codes?.firstOrNull()
+                    previousCode = code?.lowercase()?:""
+                }
+                if (!data.contains("_") && previousCode.isNotEmpty()) {
+                    codes = listOf(previousCode)
+                    displays = listOf(data)
+                }
+            }
+
+            // Combine codes and displays into pairs
+            if (codes != null && displays != null && codes.size == displays.size) {
+                previousCode=""
+              codes.zip(displays)  // This will create a list of (code, display) pairs
+            } else {
+                null  // Handle any mismatch or null values
+            }
+        }?.flatten()?.fastDistinctBy { it.first }
+    }
+
+    fun getAllLatestTasks() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val practitionerDetails = getPractitionerDetails()
+            val practitionerId = practitionerDetails?.id.toString().substringAfterLast("/")
+
+            val userName = getUserName()
+            // Fetch tasks and patients in parallel
+            val tasksDeferred = async { fhirEngine.search<Task> { } }
+            val patientsDeferred = async {
+                fhirEngine.search<Patient> {
+                    filter(ReferenceClientParam("general-practitioner"), { value = "Practitioner/$userName" })
+                }
+            }
+
+            val allTasks = tasksDeferred.await().fastMap { it.resource }
+            val patients = patientsDeferred.await().fastMap { it.resource.toResourceData() }
+                .associateBy { it.patient?.logicalId } // Use associateBy to create map with ID as key
+
+            val tasksWithPatient = allTasks.fastMapNotNull { task ->
+
+                val taskOwnerId = task.owner?.reference?.toString()?.substringAfterLast("/") ?: ""
+                val patientId = task?.`for`?.reference?.toString()?.substringAfter("/")
+                    ?: return@fastMapNotNull null
+                if (taskOwnerId == practitionerId && task.status != TaskStatus.REJECTED && patients.containsKey(
+                        patientId
+                    )
+                ) {
+                    TaskItem(task = task, patient = patients[patientId]?.patient)
+                } else {
+                    null
+                }
+            }.fastDistinctBy { it.task.logicalId }
+
+            _allLatestTasksStateFlow.value = tasksWithPatient.fastDistinctBy { it.task.logicalId }
+        }
+    }
+
+    fun searchTasks(searchText: String) {
+        _searchedTasksStateFlow.value = emptyList()
+        val isPhoneNumber = searchText.toLongOrNull() != null
+        val allTasksWithPatients = _allLatestTasksStateFlow.value
+        val matchedTasksWithPatientList = mutableListOf<TaskItem>()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            allTasksWithPatients.fastForEach { taskItem ->
+                val patient = taskItem.patient
+                patient?.let {
+                    if (isPhoneNumber) {
+                        val phone = patient?.telecom
+                            ?.firstOrNull()
+                            ?.value
+                            ?: ""
+                        if (taskItem.task.status != TaskStatus.REJECTED && phone.contains(searchText)) {
+                            matchedTasksWithPatientList.add(taskItem)
+                        }
+                    } else {
+                        val name = patient?.name
+                            ?.firstOrNull()
+                            ?.given
+                            ?.firstOrNull()
+                            ?.value
+                            ?: ""
+                        if (taskItem.task.status != TaskStatus.REJECTED && name.contains(
+                                searchText,
+                                true
+                            )
+                        ) {
+                            matchedTasksWithPatientList.add(taskItem)
+                        }
+                    }
+                }
+            }
+            _searchedTasksStateFlow.value =
+                matchedTasksWithPatientList.fastDistinctBy { it.task.logicalId }
+        }
+    }
+
+    fun clearSearch() {
+        _searchedTasksStateFlow.value = emptyList()
+    }
+
+    fun getNotContactedNewTasks(tasks: List<TaskItem>, status: TaskStatus): List<TaskItem> {
+
+        return tasks.fastFilter {
+            (it.task.status == status && it.task.output.takeIf { it.isNotEmpty() }
+                ?.get(0)?.value.valueToString() != TaskProgressState.NOT_RESPONDED.text)
+
+            //(it.task.priority != TaskPriority.ASAP && it.task.status == status)
+        }.sortedByDescending { it.task.meta.lastUpdated }.fastDistinctBy { it.task.logicalId }
+    }
+
+    fun getNotRespondedNewTasks(tasks: List<TaskItem>, status: TaskStatus): List<TaskItem> {
+        return tasks.fastFilter { it ->
+            (it.task.status == status && it.task.output.takeIf { it.isNotEmpty() }
+                ?.get(0)?.value.valueToString() == TaskProgressState.NOT_RESPONDED.text)
+        }.sortedByDescending { it.task.meta.lastUpdated }.fastDistinctBy { it.task.logicalId }
+    }
+
+    fun getPendingAgreedButNotDoneTasks(
+        newTasks: List<TaskItem>,
+        status: TaskStatus
+    ): List<TaskItem> {
+        return newTasks.fastFilter {
+            (it.task.status == status && it.task.output.takeIf { it.isNotEmpty() }
+                ?.get(0)?.value.valueToString() == TaskProgressState.AGREED_FOLLOWUP_NOT_DONE.text)
+
+
+            //(it.task.priority == TaskPriority.STAT && it.task.status == status)
+        }.sortedByDescending { it.task.meta.lastUpdated }.fastDistinctBy { it.task.logicalId }
+    }
+
+    fun getPendingNotAgreedTasks(newTasks: List<TaskItem>, status: TaskStatus): List<TaskItem> {
+        return newTasks.fastFilter {
+            (it.task.status == status && it.task.output.takeIf { it.isNotEmpty() }
+                ?.get(0)?.value.valueToString() == TaskProgressState.NOT_AGREED_FOR_FOLLOWUP.text)
+
+
+            //(it.task.priority == TaskPriority.URGENT && it.task.status == status)
+        }.sortedByDescending { it.task.meta.lastUpdated }.fastDistinctBy { it.task.logicalId }
+    }
+
+
+    fun updateRegisterFilterState(
+        registerId: String,
+        questionnaireResponse: QuestionnaireResponse
+    ) {
+        // Reset filter state if no answer is provided for all the fields
+        if (questionnaireResponse.item.all { !it.hasAnswer() }) {
+            registerFilterState.value =
+                RegisterFilterState(
+                    questionnaireResponse = null,
+                    fhirResourceConfig = null,
+                )
+            return
+        }
+
+        val registerConfiguration = retrieveRegisterConfiguration(registerId)
+        val resourceConfig = registerConfiguration.fhirResource
+        val baseResource = resourceConfig.baseResource
+        val qrItemMap =
+            questionnaireResponse.item.groupBy { it.linkId }.mapValues { it.value.first() }
+
+        val registerDataFilterFieldsMap =
+            registerConfiguration.registerFilter
+                ?.dataFilterFields
+                ?.groupBy { it.filterId }
+                ?.mapValues { it.value.first() }
+
+        // Get filter queries from the map. NOTE: filterId MUST be unique for all resources
+        val newBaseResourceDataQueries =
+            createQueriesForRegisterFilter(
+                registerDataFilterFieldsMap?.get(baseResource.filterId)?.dataQueries,
+                qrItemMap,
+            )
+
+        Timber.i(
+            "New data queries for filtering Base Resources: ${newBaseResourceDataQueries.encodeJson()}",
+        )
+
+        val newRelatedResources =
+            createFilterRelatedResources(
+                registerDataFilterFieldsMap = registerDataFilterFieldsMap,
+                relatedResources = resourceConfig.relatedResources,
+                qrItemMap = qrItemMap,
+            )
+
+        Timber.i(
+            "New configurations for filtering related resource data: ${newRelatedResources.encodeJson()}",
+        )
+
+        registerFilterState.value =
+            RegisterFilterState(
+                questionnaireResponse = questionnaireResponse,
+                fhirResourceConfig =
+                FhirResourceConfig(
+                    baseResource = baseResource.copy(dataQueries = newBaseResourceDataQueries),
+                    relatedResources = newRelatedResources,
+                ),
+            )
+    }
+
+    private fun createFilterRelatedResources(
+        registerDataFilterFieldsMap: Map<String, RegisterFilterField>?,
+        relatedResources: List<ResourceConfig>,
+        qrItemMap: Map<String, QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    ): List<ResourceConfig> {
+        val newRelatedResources =
+            relatedResources.fastMap {
+                val newDataQueries =
+                    createQueriesForRegisterFilter(
+                        registerDataFilterFieldsMap?.get(it.filterId)?.dataQueries,
+                        qrItemMap,
+                    )
+                it.copy(
+                    dataQueries = newDataQueries,
+                    relatedResources =
+                    createFilterRelatedResources(
+                        registerDataFilterFieldsMap = registerDataFilterFieldsMap,
+                        relatedResources = it.relatedResources,
+                        qrItemMap = qrItemMap,
+                    ),
+                )
+            }
+        return newRelatedResources
+    }
+
+    private fun createQueriesForRegisterFilter(
+        dataQueries: List<DataQuery>?,
+        qrItemMap: Map<String, QuestionnaireResponse.QuestionnaireResponseItemComponent>,
+    ) =
+        dataQueries?.fastMap {
+            val newFilterCriteria = mutableListOf<FilterCriterionConfig>()
+            it.filterCriteria.fastForEach { filterCriterionConfig ->
+                val answerComponent = qrItemMap[filterCriterionConfig.dataFilterLinkId]
+                answerComponent?.answer?.fastForEach { itemAnswerComponent ->
+                    val criterion =
+                        convertAnswerToFilterCriterion(itemAnswerComponent, filterCriterionConfig)
+                    if (criterion != null) newFilterCriteria.add(criterion)
+                }
+            }
+            it.copy(
+                filterCriteria = if (newFilterCriteria.isEmpty()) it.filterCriteria else newFilterCriteria,
+            )
+        }
+
+    private fun convertAnswerToFilterCriterion(
+        answerComponent: QuestionnaireResponse.QuestionnaireResponseItemAnswerComponent,
+        oldFilterCriterion: FilterCriterionConfig,
+    ): FilterCriterionConfig? =
+        when {
+            answerComponent.hasValueCoding() -> {
+                val valueCoding: Coding = answerComponent.valueCoding
+                FilterCriterionConfig.TokenFilterCriterionConfig(
+                    dataType = DataType.CODE,
+                    computedRule = oldFilterCriterion.computedRule,
+                    value = Code(valueCoding.system, valueCoding.code, valueCoding.display),
+                )
+            }
+
+            answerComponent.hasValueStringType() -> {
+                val stringFilterCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.StringFilterCriterionConfig
+                FilterCriterionConfig.StringFilterCriterionConfig(
+                    dataType = DataType.STRING,
+                    computedRule = stringFilterCriterion.computedRule,
+                    modifier = stringFilterCriterion.modifier,
+                    value = answerComponent.valueStringType.value,
+                )
+            }
+
+            answerComponent.hasValueQuantity() -> {
+                val quantityCriteria =
+                    oldFilterCriterion as FilterCriterionConfig.QuantityFilterCriterionConfig
+                FilterCriterionConfig.QuantityFilterCriterionConfig(
+                    dataType = DataType.QUANTITY,
+                    computedRule = quantityCriteria.computedRule,
+                    prefix = quantityCriteria.prefix,
+                    system = quantityCriteria.system,
+                    unit = quantityCriteria.unit,
+                    value = answerComponent.valueDecimalType.value,
+                )
+            }
+
+            answerComponent.hasValueIntegerType() -> {
+                val numberFilterCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.NumberFilterCriterionConfig
+                FilterCriterionConfig.NumberFilterCriterionConfig(
+                    dataType = DataType.DECIMAL,
+                    computedRule = numberFilterCriterion.computedRule,
+                    prefix = numberFilterCriterion.prefix,
+                    value = answerComponent.valueIntegerType.value.toBigDecimal(),
+                )
+            }
+
+            answerComponent.hasValueDecimalType() -> {
+                val numberFilterCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.NumberFilterCriterionConfig
+                FilterCriterionConfig.NumberFilterCriterionConfig(
+                    dataType = DataType.DECIMAL,
+                    computedRule = numberFilterCriterion.computedRule,
+                    prefix = numberFilterCriterion.prefix,
+                    value = answerComponent.valueDecimalType.value,
+                )
+            }
+
+            answerComponent.hasValueDateTimeType() -> {
+                val dateFilterCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.DateFilterCriterionConfig
+                FilterCriterionConfig.DateFilterCriterionConfig(
+                    dataType = DataType.DATETIME,
+                    computedRule = dateFilterCriterion.computedRule,
+                    prefix = dateFilterCriterion.prefix,
+                    valueAsDateTime = true,
+                    value = answerComponent.valueDecimalType.asStringValue(),
+                )
+            }
+
+            answerComponent.hasValueDateType() -> {
+                val dateFilterCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.DateFilterCriterionConfig
+                FilterCriterionConfig.DateFilterCriterionConfig(
+                    dataType = DataType.DATE,
+                    computedRule = dateFilterCriterion.computedRule,
+                    prefix = dateFilterCriterion.prefix,
+                    valueAsDateTime = false,
+                    value = answerComponent.valueDateType.asStringValue(),
+                )
+            }
+
+            answerComponent.hasValueUriType() -> {
+                val uriCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.UriFilterCriterionConfig
+                FilterCriterionConfig.UriFilterCriterionConfig(
+                    dataType = DataType.URI,
+                    computedRule = uriCriterion.computedRule,
+                    value = answerComponent.valueUriType.valueAsString,
+                )
+            }
+
+            answerComponent.hasValueReference() -> {
+                val referenceCriterion =
+                    oldFilterCriterion as FilterCriterionConfig.ReferenceFilterCriterionConfig
+                FilterCriterionConfig.ReferenceFilterCriterionConfig(
+                    dataType = DataType.REFERENCE,
+                    computedRule = referenceCriterion.computedRule,
+                    value = answerComponent.valueReference.reference,
+                )
+            }
+
+            else -> {
+                null
+            }
+        }
+
+    fun retrieveRegisterUiState(
+        registerId: String,
+        screenTitle: String,
+        params: Array<ActionParameter>? = emptyArray(),
+        clearCache: Boolean,
+    ) {
+        if (registerId.isNotEmpty()) {
+            val paramsMap: Map<String, String> = params.toParamDataMap()
+            viewModelScope.launch(Dispatchers.IO) {
+                val currentRegisterConfiguration =
+                    retrieveRegisterConfiguration(registerId, paramsMap)
+
+                paginateRegisterData(registerId, loadAll = false, clearCache = clearCache)
+
+                registerUiState.value =
+                    RegisterUiState(
+                        screenTitle = currentRegisterConfiguration.registerTitle ?: screenTitle,
+                        isFirstTimeSync =
+                        sharedPreferencesHelper
+                            .read(SharedPreferenceKey.LAST_SYNC_TIMESTAMP.name, null)
+                            .isNullOrEmpty(),
+                        registerConfiguration = currentRegisterConfiguration,
+                        registerId = registerId,
+                        progressPercentage = _percentageProgress,
+                        isSyncUpload = _isUploadSync,
+                        params = paramsMap,
+                    )
+            }
+        }
+    }
+
+    suspend fun emitSnackBarState(snackBarMessageConfig: SnackBarMessageConfig) {
+        _snackBarStateFlow.emit(snackBarMessageConfig)
+    }
+
+    suspend fun emitPercentageProgressState(progress: Int, isUploadSync: Boolean) {
+        _percentageProgress.emit(progress)
+        _isUploadSync.emit(isUploadSync)
+    }
+
+    fun getDashboardCasedData() {
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _isFetching.value = true
+            val userName = getUserName()
+            val patients = fhirEngine.search<Patient> {
+                filter(ReferenceClientParam("general-practitioner"), { value = "Practitioner/$userName" })
+            }.fastMap {
+                it.resource
+            }
+
+            val todayCases = patients.fastFilter {
+                val extension = it?.extension?.find {
+                    it.url?.substringAfterLast("/").equals("patient-registraion-date")
+                }
+                if (extension != null && extension.value?.asStringValue()?.isNotEmpty() == true) {
+                    val date = convertToDateStringToDate(extension.value?.asStringValue())
+                    date?.isToday() ?: false
+                } else {
+                    false
+                }
+            }.size
+
+            val thisWeek = patients.fastFilter {
+
+                val extension = it?.extension?.find {
+                    it.url?.substringAfterLast("/").equals("patient-registraion-date")
+                }
+                if (extension != null && extension.value?.asStringValue()?.isNotEmpty() == true) {
+                    val date = convertToDateStringToDate(extension.value?.asStringValue())
+                    if (date != null) {
+                        date.isInCurrentWeek()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }.size
+
+            val thisMonth = patients.fastFilter {
+                val extension = it?.extension?.find {
+                    it.url?.substringAfterLast("/").equals("patient-registraion-date")
+                }
+                if (extension != null && extension.value?.asStringValue()?.isNotEmpty() == true) {
+                    val date = convertToDateStringToDate(extension.value?.asStringValue())
+                    if (date != null) {
+                        date.isInCurrentMonth()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }.size
+
+            val data = DashboardData("$todayCases", "$thisWeek", "$thisMonth", "${patients.size}")
+            // Update UI or perform further actions with the counts
+            _dashboardDataStateFlow.value = data
+            _isFetching.value = false
+        }
+    }
+
+    fun getAllPatients() {
+        _isFetching.value = true
+        _isFetchingPatients.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val userName = getUserName()
+
+                // Quick first paint: surface the most-recently-updated patients right away (cheap
+                // DB sort + limit, so we only deserialize a handful) so the user sees cases almost
+                // immediately instead of waiting for the full list to load and sort. Only done on a
+                // cold load (nothing shown yet) to avoid reordering data the user is already viewing.
+                if (_allPatientsStateFlow.value.isEmpty()) {
+                    runCatching {
+                        fhirEngine.search<Patient> {
+                            filter(
+                                ReferenceClientParam("general-practitioner"),
+                                { value = "Practitioner/$userName" },
+                            )
+                            sort(StringClientParam(SyncDataParams.LAST_UPDATED_KEY), Order.DESCENDING)
+                            count = PATIENT_PREVIEW_COUNT
+                        }.fastMap { it.resource.toResourceData() }
+                    }
+                        .onSuccess { preview ->
+                            if (preview.isNotEmpty() && _allPatientsStateFlow.value.isEmpty()) {
+                                _allPatientsStateFlow.value = preview
+                                // Cases are on screen now; drop the spinner without waiting for the
+                                // full list. The total count ("See N more") fills in once it lands.
+                                _isFetchingPatients.value = false
+                                refreshCaseSyncStatus(preview)
+                            }
+                        }
+                        .onFailure { Timber.e(it, "Quick patient preview failed") }
+                }
+
+                // Authoritative load: full list ordered by registration date (desc). The sort key is
+                // precomputed once per patient (decorate-sort-undecorate) so the date string is
+                // parsed O(N) times instead of O(N log N) during comparisons.
+                val patients = fhirEngine.search<Patient> {
+                    filter(ReferenceClientParam("general-practitioner"), { value = "Practitioner/$userName" })
+                }.fastMap {
+                    it.resource.toResourceData()
+                }
+                    .map { it to it.registrationDateSortKey() }
+                    .sortedByDescending { it.second }
+                    .fastMap { it.first }
+
+                // Updating the state flow
+                _allPatientsStateFlow.value = patients
+                refreshCaseSyncStatus(patients)
+            } finally {
+                _isFetching.value = false
+                _isFetchingPatients.value = false
+            }
+        }
+    }
+
+    /**
+     * Checks whether each of the first [limit] patients in [patients] has its metadata and
+     * screening images fully synced to the server, and merges the results into
+     * [caseSyncStatusStateFlow]. [limit] defaults to [VISIBLE_SYNC_STATUS_CHECK_COUNT] - roughly
+     * what's on screen at once on the compact register - since every check is a handful of local DB
+     * reads; callers showing the full list (e.g. the "see all" screen) pass a larger [limit] so every
+     * row gets an accurate badge instead of only the first few.
+     */
+    fun refreshCaseSyncStatus(
+        patients: List<AllPatientsResourceData> = _allPatientsStateFlow.value,
+        limit: Int = VISIBLE_SYNC_STATUS_CHECK_COUNT,
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val toCheck = patients
+                .asSequence()
+                .filter { it.resourceType == AllPatientsResourceType.Patient }
+                .mapNotNull { it.patient }
+                .take(limit)
+                .toList()
+            val statuses = toCheck.associate { it.logicalId to isCaseFullySynced(it) }
+            _caseSyncStatusStateFlow.value = _caseSyncStatusStateFlow.value + statuses
+        }
+    }
+
+    /**
+     * A case is fully synced when the Patient resource itself has no pending local change and none
+     * of its QuestionnaireResponses (or the screening images they reference) have one either. All
+     * checks are local DB reads/queries against [fhirEngine] - no network round trip.
+     */
+    private suspend fun isCaseFullySynced(patient: Patient): Boolean {
+        val patientId = patient.logicalId
+        if (fhirEngine.getLocalChanges(ResourceType.Patient, patientId).isNotEmpty()) return false
+
+        val relatedResponses = runCatching {
+            fhirEngine.search<QuestionnaireResponse> {
+                filter(ReferenceClientParam("subject"), { value = "Patient/$patientId" })
+            }.fastMap { it.resource }
+        }.getOrDefault(emptyList())
+
+        relatedResponses.forEach { response ->
+            if (fhirEngine.getLocalChanges(ResourceType.QuestionnaireResponse, response.logicalId).isNotEmpty()) {
+                return false
+            }
+            if (hasUnsyncedScreeningImages(response)) return false
+        }
+        return true
+    }
+
+    /**
+     * A screening image is still pending upload as long as its DocumentReference is present in the
+     * local FhirEngine: [AppSyncWorker] only purges a DocumentReference once its image has been
+     * uploaded and verified on the server, so absence locally means the image is synced.
+     */
+    private suspend fun hasUnsyncedScreeningImages(response: QuestionnaireResponse): Boolean {
+        val documentReferenceIds = response.item
+            .filter { it.linkId == QuestionnaireViewModel.SCREENING_GROUP_LINK_ID }
+            .flatMap { it.item }
+            .filter { it.linkId == QuestionnaireViewModel.PATIENT_SCREENING_IMAGE_GROUP_LINK_ID }
+            .flatMap { it.item }
+            .flatMap { it.answer }
+            .filter { it.hasValueAttachment() }
+            .mapNotNull { extractDocumentReferenceIdFromUrl(it.valueAttachment.url) }
+
+        return documentReferenceIds.any { id ->
+            runCatching { fhirEngine.get(ResourceType.DocumentReference, id) }.isSuccess
+        }
+    }
+
+    /**
+     * Extracts the DocumentReference logical id from a binary-access-read URL of the form
+     * `.../DocumentReference/{id}/$binary-access-read?...`. Mirrors
+     * [QuestionnaireViewModel.extractDocumentReferenceIdFromUrl].
+     */
+    private fun extractDocumentReferenceIdFromUrl(url: String?): String? {
+        if (url == null) return null
+        return Regex("DocumentReference/([^/]+)/").find(url)?.groupValues?.get(1)
+    }
+
+    /**
+     * Sort key used to order patients on the register: the "patient-registraion-date" extension when
+     * present, otherwise the resource's last-updated timestamp. Falls back to epoch when neither is
+     * available so the comparison never hits a null (which would crash the sort).
+     */
+    private fun AllPatientsResourceData.registrationDateSortKey(): Date {
+        val extension = patient?.extension?.find {
+            it.url?.substringAfterLast("/").equals("patient-registraion-date")
+        }
+        val extensionValue = extension?.value?.asStringValue()
+        return if (!extensionValue.isNullOrEmpty()) {
+            convertToDateStringToDate(extensionValue) ?: meta.lastUpdated ?: Date(0)
+        } else {
+            meta.lastUpdated ?: Date(0)
+        }
+    }
+
+    //TODO: check the error java.lang.NullPointerException: null cannot be cast to non-null type kotlin.collections.Map<*, *>
+    fun getAllSyncedPatients() {
+        _isFetching.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val userName = getUserName()
+
+            // Fetching patients
+            // Fetching unsynced patients
+            val unsyncedPatients = mutableListOf<AllPatientsResourceData>()
+            val data = fhirEngine.getUnsyncedLocalChanges()
+            data.fastForEach { localChange ->
+                val patient = parsePatientJson(localChange.payload)
+                patient?.let {
+                    patient?.let {
+                        if (patient.name.isNotEmpty()) {
+                            unsyncedPatients.add(it.toResourceData())
+                        }
+                    }
+                }
+            }
+//            data.forEach { localChange ->
+//                try {
+//                    val fhirContext = FhirContext.forR4()
+//                    val jsonParser: IParser = fhirContext.newJsonParser()
+//                    // Parse the payload (JSON string) into a Resource
+//                    val resource: Resource = jsonParser.parseResource(localChange.payload) as Resource
+//
+//                    // Check if the resource is of the desired type (modify as needed)
+//                    if (isResourceType(localChange.payload)) {
+//                        // Modify the resource (e.g., replace "Flw1" with "flw1")
+//                        val updatedJson = jsonParser.encodeResourceToString(resource)
+//                            .replace("Flw1", "flw1")
+//
+//                        // Parse the updated JSON back into a Resource
+//                        val updatedResource: Resource = jsonParser.parseResource(updatedJson)  as Resource
+//
+//                        // Update the resource in the FHIR Engine's database
+//                        fhirEngine.update(updatedResource)
+//
+//                        // Optionally, mark the LocalChange as synced or delete it
+//                        // Note: This depends on your sync logic. You might need to create a new LocalChange
+//                        // or let the sync process handle it.
+//                    }
+//                } catch (e: Exception) {
+//                    // Handle parsing or update errors
+//                    e.printStackTrace()
+//                }
+//            }
+
+
+            val patients = fhirEngine.search<Patient> {
+                filter(ReferenceClientParam("general-practitioner"), { value = "Practitioner/$userName" })
+            }.fastMap {
+                it.resource.toResourceData()
+            }
+
+            //Removing the unsynced Patient present in the patientsList
+            val filteredPatients = patients.filterNot { patient ->
+                unsyncedPatients.any { unsyncedPatient ->
+                    patient.patient?.logicalId == unsyncedPatient.patient2?.id
+                }
+            }.sortedByDescending {
+                val extension = it?.patient?.extension?.find {
+                    it.url?.substringAfterLast("/").equals("patient-registraion-date")
+                }
+                if (extension != null && extension.value?.asStringValue()?.isNotEmpty() == true) {
+                    val date = convertToDateStringToDate(extension.value?.asStringValue())
+                    date ?: it.meta.lastUpdated
+                } else {
+                    it.meta.lastUpdated
+                }
+            }
+
+            _allSyncedPatientsStateFlow.value = filteredPatients
+            _isFetching.value = false
+        }
+    }
+
+    fun getAllDraftResponses() {
+        viewModelScope.launch(dispatcherProvider.io()) {
+            _isFetching.value = true
+            val allResponses = mutableListOf<QuestionnaireResponse>()
+            try {
+                val parser = FhirContext.forR4Cached().newJsonParser()
+                val draftResponsesJson =
+                    getAllDraftsJsonFromSharedPreferences(sharedPreferencesHelper)
+                if (!draftResponsesJson.isNullOrEmpty()) {
+                    val allDrafts = parseDraftResponses(parser, draftResponsesJson)
+                    allDrafts?.entry?.fastForEach {
+                        allResponses.add(it.resource as QuestionnaireResponse)
+                    }
+                    allResponses.sortedByDescending { it?.meta?.lastUpdated }
+                }
+            } catch (exception: Exception) {
+                Timber.e(exception, "An error occurred while getting all drafts")
+            }
+
+            val userName = getUserName()
+            val responses = fhirEngine.search<QuestionnaireResponse> {
+                filter(TokenClientParam("status"), { value = of(QuestionnaireResponse.QuestionnaireResponseStatus.INPROGRESS.toCode()) })
+                filter(ReferenceClientParam("author"), { value = "Practitioner/$userName" })
+            }.fastMap {
+                it.resource
+            }
+                .sortedByDescending { it.meta.lastUpdated }
+
+            _allSavedDraftResponseStateFlow.value = allResponses + responses
+            _isFetching.value = false
+        }
+    }
+
+    private suspend fun loadAllUnSyncedPatients(): List<Patient2> {
+        val patients = mutableListOf<Patient2>()
+        fhirEngine.getUnsyncedLocalChanges().forEach { localChange ->
+            val patient = parsePatientJson(localChange.payload)
+            patient?.let {
+                if (patient.name.isNotEmpty()) {
+                    patients.add(patient)
+                }
+            }
+        }
+        patients.reverse()
+        return patients
+    }
+
+    private suspend fun loadAllUnSyncedImagesCount(): Int =
+        fhirEngine
+            .search<DocumentReference> {}
+            .count { it.resource.description != DocumentReferenceCaseType.DRAFT.name }
+
+    fun getAllUnSyncedPatients() {
+        viewModelScope.launch(dispatcherProvider.io()) {
+            _allUnSyncedStateFlow.value = loadAllUnSyncedPatients()
+        }
+    }
+
+    fun getAllUnSyncedPatientsImages() {
+        viewModelScope.launch(dispatcherProvider.io()) {
+            _allUnSyncedImages.value = loadAllUnSyncedImagesCount()
+        }
+    }
+
+    /**
+     * Reloads both counts specifically for the foreground sync dialog.
+     *
+     * The dialog state is set to [ForegroundSyncDialogState.Loading] before any database work so a
+     * previously loaded value (especially zero) can never be presented as the current result. Both
+     * counts are published together only after this refresh finishes.
+     */
+    fun refreshForegroundSyncStatus() {
+        foregroundSyncStatusRefreshJob?.cancel()
+        _foregroundSyncDialogState.value = ForegroundSyncDialogState.Loading
+        foregroundSyncStatusRefreshJob =
+            viewModelScope.launch(dispatcherProvider.io()) {
+                try {
+                    val patients = loadAllUnSyncedPatients()
+                    val imageCount = loadAllUnSyncedImagesCount()
+
+                    // Keep the existing screen-level flows current too, but use the atomic dialog
+                    // state below as the only source rendered inside the dialog.
+                    _allUnSyncedStateFlow.value = patients
+                    _allUnSyncedImages.value = imageCount
+                    _foregroundSyncDialogState.value =
+                        ForegroundSyncDialogState.Loaded(
+                            imageCount = imageCount,
+                            patientsCount = patients.size,
+                        )
+                } catch (exception: CancellationException) {
+                    throw exception
+                } catch (exception: Exception) {
+                    Timber.e(exception, "Failed to load foreground sync status")
+                    _foregroundSyncDialogState.value = ForegroundSyncDialogState.Failed
+                }
+            }
+    }
+
+    fun setShowDialog(value: Boolean) {
+        if (value) {
+            // Start the refresh before making the dialog visible. This guarantees the first frame
+            // is progress even when a previous invocation loaded zero pending resources.
+            refreshForegroundSyncStatus()
+            watchSyncWhileDialogIsOpen()
+        } else {
+            syncStateWatchJob?.cancel()
+            syncStateWatchJob = null
+        }
+        _showDialog.value = value
+    }
+
+    /**
+     * A sync running underneath the open dialog invalidates the counts it is showing: they were read
+     * when it opened, and every uploaded case and image drops them. Re-read on each start/stop so an
+     * open dialog converges on the true pending count instead of stranding the numbers from before
+     * the sync.
+     *
+     * `drop(1)` skips the value the [StateFlow] replays on subscription, which is not a transition —
+     * [setShowDialog] has just refreshed for it.
+     */
+    private fun watchSyncWhileDialogIsOpen() {
+        syncStateWatchJob?.cancel()
+        syncStateWatchJob =
+            viewModelScope.launch {
+                isSyncRunning.drop(1).collect { refreshForegroundSyncStatus() }
+            }
+    }
+
+    fun deleteIfNotOldDraft(resourceId: String) {
+        openedDraftId.set(resourceId)
+        viewModelScope.launch(dispatcherProvider.io()) {
+            try {
+                val parser = FhirContext.forR4Cached().newJsonParser()
+                val draftResponsesJson =
+                    getAllDraftsJsonFromSharedPreferences(sharedPreferencesHelper)
+
+                val allDrafts = parseDraftResponses(parser, draftResponsesJson)
+
+                if (allDrafts?.entry?.fastAny { it.resource?.id == resourceId } == true) {
+                    removeDraftFromBundle(allDrafts, resourceId)
+                    saveBundleToSharedPreferences(sharedPreferencesHelper, parser, allDrafts)
+                }
+            } catch (exception: Exception) {
+                Timber.e(exception, "An error occurred while deleteIfNotOldDraft")
+            }
+        }
+    }
+
+    /**
+     * Drops the draft a submitted case came from, so it can never be reopened and submitted again.
+     *
+     * Resubmitting it registers a duplicate case whose screening images are missing: the first
+     * submission already flipped those DocumentReferences to SUBMITTED and the sync worker has since
+     * purged them locally, so the reconciliation drops the now-dangling answers.
+     *
+     * The rendered list is trimmed *synchronously* before the storage work starts. [deleteIfNotOldDraft]
+     * only clears the SharedPreferences copy — an engine-backed INPROGRESS draft survives it — and
+     * [getAllDraftResponses] is asynchronous (a prefs read plus a FhirEngine search), which is the
+     * window QA tapped the stale card in after backing out of a submission.
+     */
+    fun purgeSubmittedDraft() {
+        val draftId = openedDraftId.getAndSet(null) ?: return
+        val draftLogicalId = draftId.extractLogicalIdUuid()
+
+        _allSavedDraftResponseStateFlow.value =
+            _allSavedDraftResponseStateFlow.value.filterNot {
+                it.id?.extractLogicalIdUuid() == draftLogicalId
+            }
+
+        viewModelScope.launch(dispatcherProvider.io()) {
+            // [deleteIfNotOldDraft] takes a draft out of shared preferences the moment it is opened,
+            // and only a back-out puts it back. So finding it here means the user abandoned it
+            // earlier and this submission is a different, unrelated case — deleting it would throw
+            // away work the user still expects to see.
+            val stillPending =
+                try {
+                    val parser = FhirContext.forR4Cached().newJsonParser()
+                    parseDraftResponses(
+                        parser,
+                        getAllDraftsJsonFromSharedPreferences(sharedPreferencesHelper),
+                    )
+                        ?.entry
+                        // Compare logical ids: HAPI hands back a qualified id
+                        // ("QuestionnaireResponse/abc") for a parsed resource, while the id the
+                        // draft was opened with can be either form.
+                        ?.fastAny { it.resource?.id?.extractLogicalIdUuid() == draftLogicalId } == true
+                } catch (exception: Exception) {
+                    // Never delete on an unknown state; a stale row is recoverable, lost work is not.
+                    Timber.e(exception, "Failed to check whether draft $draftId is still pending")
+                    true
+                }
+
+            if (stillPending) {
+                Timber.i("Draft $draftId was abandoned, not submitted; leaving it in place")
+            } else {
+                // A draft held as an INPROGRESS QuestionnaireResponse in the engine has to go too,
+                // otherwise the next getAllDraftResponses() search brings it straight back. Only
+                // while it is still INPROGRESS, though — the submitted case reuses the draft's id,
+                // so [deleteDraftFromRepository] refuses once the response has been completed.
+                try {
+                    deleteDraftFromRepository(draftId)
+                } catch (exception: Exception) {
+                    Timber.e(exception, "Failed to delete submitted draft $draftId from the engine")
+                }
+            }
+
+            // Restores the row if the trim above was wrong, and reflects the deletion if it was not.
+            getAllDraftResponses()
+        }
+    }
+
+    /** Forgets the opened draft without deleting it — the user backed out instead of submitting. */
+    fun forgetOpenedDraft() {
+        openedDraftId.set(null)
+    }
+
+    companion object {
+        /**
+         * Id of the draft most recently opened for editing, so it can be purged once its case is
+         * submitted — see [purgeSubmittedDraft].
+         *
+         * Process-wide rather than per-instance because the home register and the "view all" screen
+         * each own a separate fragment-scoped RegisterViewModel: a draft opened from one screen is
+         * routinely submitted while a different instance is the one handling the result event.
+         */
+        private val openedDraftId = AtomicReference<String?>(null)
+    }
+
+    fun softDeleteDraft(resourceId: String) {
+        viewModelScope.launch(dispatcherProvider.io()) {
+            try {
+                val parser = FhirContext.forR4Cached().newJsonParser()
+
+                val draftResponsesJson =
+                    getAllDraftsJsonFromSharedPreferences(sharedPreferencesHelper)
+
+                val allDrafts = parseDraftResponses(parser, draftResponsesJson)
+
+                if (allDrafts?.entry?.fastAny { it.resource?.id == resourceId } == true) {
+                    saveBundleToSharedPreferences(
+                        sharedPreferencesHelper,
+                        parser,
+                        removeDraftFromBundle(allDrafts, resourceId)
+                    )
+                } else {
+                    deleteDraftFromRepository(resourceId)
+                }
+                refreshData()
+            } catch (exception: Exception) {
+                Timber.e(exception, "An error occurred while softDeleteDraft")
+            }
+        }
+    }
+
+
+    /**
+     * Deletes the draft [QuestionnaireResponse] [resourceId] — but only for as long as it really is
+     * a draft.
+     *
+     * A draft and the case submitted from it are the *same resource*. The draft's id survives the
+     * round trip through QuestionnaireFragment (the response is handed over as JSON and comes back
+     * with its id intact), so submitting a draft stores the case's response under the id the draft
+     * was saved with, flipping its status from INPROGRESS to COMPLETED. Deleting by id afterwards
+     * therefore destroyed the registered case's QuestionnaireResponse: the Patient, Encounter,
+     * Observations and Media survived, but every answer the FLW had typed and every screening image
+     * was gone — the case opened blank on the dashboard. Directly submitted cases were unaffected
+     * precisely because no draft id was ever recorded for them.
+     *
+     * A completed response is never listed as a draft anyway — [getAllDraftResponses] only searches
+     * the engine for INPROGRESS ones — so refusing here costs nothing and keeps the guarantee that a
+     * submitted draft cannot be reopened.
+     */
+    private suspend fun deleteDraftFromRepository(resourceId: String) {
+        val logicalId = resourceId.extractLogicalIdUuid()
+        val storedDraft =
+            try {
+                fhirEngine.get(ResourceType.QuestionnaireResponse, logicalId) as QuestionnaireResponse
+            } catch (notFound: ResourceNotFoundException) {
+                // Only ever lived in shared preferences; there is nothing in the engine to delete.
+                null
+            }
+
+        if (
+            storedDraft != null &&
+            storedDraft.status != QuestionnaireResponse.QuestionnaireResponseStatus.INPROGRESS
+        ) {
+            Timber.i(
+                "QuestionnaireResponse %s is %s, not a draft; keeping it — its case has been submitted",
+                logicalId,
+                storedDraft.status,
+            )
+            return
+        }
+
+        registerRepository.delete(
+            resourceType = ResourceType.QuestionnaireResponse,
+            resourceId = logicalId,
+            softDelete = false
+        )
+    }
+
+    private fun refreshData() {
+        getAllDraftResponses()
+        getAllPatients()
+        //getHomeScreenPatients()
+    }
+
+
+    /** The Patient's details for display purposes. */
+    data class PatientItem(
+        val id: String,
+        val resourceId: String,
+        val name: String,
+        val gender: String,
+        val dob: LocalDate? = null,
+        val phone: String,
+        val city: String,
+        val country: String,
+        val isActive: Boolean,
+        val html: String,
+        var risk: String? = ""
+    ) {
+        override fun toString(): String = name
+    }
+
+    /** The Observation's details for display purposes. */
+    data class ObservationItem(
+        val id: String,
+        val code: String,
+        val effective: String,
+        val value: String,
+    ) {
+        override fun toString(): String = code
+    }
+
+    data class ConditionItem(
+        val id: String,
+        val code: String,
+        val effective: String,
+        val value: String,
+    ) {
+        override fun toString(): String = code
+    }
+
+
+    data class TaskItem(
+        val task: Task,
+        val patient: Patient?
+    )
+
+    data class Patient2(
+        val id: String,
+        val name: String,
+        val lastUpdated: String,
+        val gender: String,
+        val primaryContact: String?,
+        val age: Int?
+    )
+
+    data class DraftPatient(
+        val name: String,
+        val payloadJson: String
+    )
+
+    data class DashboardData constructor(
+        val todayCases: String,
+        val thisWeekCases: String,
+        val thisMonthCases: String,
+        val totalCases: String
+    ) {
+
+    }
+
+    private fun parsePatientJson(json: String): Patient2? {
+        if (!isResourceTypePatient(json)) return null
+        val gson = Gson()
+        try {
+            val patientData = gson.fromJson(json, Map::class.java)
+
+            var name: String? = ""
+            if (patientData.keys.contains("name")) {
+                val patientDataName = patientData["name"]
+                if (patientDataName != null) {
+                    val nameList = patientDataName as? List<*>?
+                    name = if (nameList != null && nameList.isNotEmpty()) {
+                        val firstName = (nameList[0] as? Map<*, *>)?.get("given") as? List<*>?
+                        if (firstName != null && firstName.isNotEmpty()) {
+                            firstName[0] as String
+                        } else {
+                            null
+                        }
+                    } else {
+                        null
+                    }
+                }
+            } else {
+                return null
+            }
+
+            val id = patientData["id"] as? String? ?: ""
+            val lastUpdated =
+                (patientData["meta"] as? Map<*, *>)?.get("lastUpdated") as? String? ?: ""
+            val gender = patientData["gender"] as? String?
+            val telecomData = patientData["telecom"] as? List<*>?
+            val mobile = (telecomData?.get(0) as? Map<*, *>)?.get("value").toString() ?: ""
+
+            return Patient2(id = id, name ?: "", lastUpdated = lastUpdated, gender ?: "", mobile, 0)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    private fun isResourceTypePatient(jsonString: String): Boolean {
+        if (jsonString.isEmpty() || !isJsonObject(jsonString)) return false
+        var jsonObject: JSONObject? = null
+        try {
+            jsonObject = JSONObject(jsonString)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return jsonString.isNotEmpty() && jsonObject?.optString("resourceType")
+            .equals("Patient", true)
+    }
+
+    private fun isResourceType(jsonString: String): Boolean {
+        if (jsonString.isEmpty() || !isJsonObject(jsonString)) return false
+        var jsonObject: JSONObject? = null
+        try {
+            jsonObject = JSONObject(jsonString)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return jsonString.isNotEmpty() &&
+                (jsonObject?.optString("resourceType").equals("Patient", true) ||
+                jsonObject?.optString("resourceType").equals("Encounter", true) ||
+                jsonObject?.optString("resourceType").equals("Media", true) ||
+                jsonObject?.optString("resourceType").equals("QuestionnaireResponse", true)
+                )
+    }
+
+    private fun isJsonObject(jsonString: String): Boolean {
+        if (jsonString.isEmpty() || jsonString.isBlank()) {
+            return false // Not a valid JSON object
+        }
+        try {
+            JSONObject(jsonString)
+            return true // Valid JSONObject
+        } catch (e: JSONException) {
+            return false // Not a valid JSONObject
+        }
+    }
+
+    fun parseQuestionnaireResponseJson(json: String): DraftPatient? {
+        val gson = Gson()
+        try {
+            val patientData = gson.fromJson(json, Map::class.java)
+
+            val nameList = patientData["name"] as List<*>?
+            val name = if (nameList != null && nameList.isNotEmpty()) {
+                val firstName = (nameList[0] as Map<*, *>)["given"] as List<*>?
+                if (firstName != null && firstName.isNotEmpty()) {
+                    firstName[0] as String
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+
+            val gender = patientData["gender"] as String?
+            val telecomData = patientData["telecom"] as List<*>?
+
+            return DraftPatient(name ?: "", gender ?: "")
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    // Helper function to convert Patient to ResourceData
+    private fun Patient.toResourceData(): AllPatientsResourceData {
+        return AllPatientsResourceData(
+            id = id,
+            meta = meta,
+            resourceType = AllPatientsResourceType.Patient,
+            patient = this
+        )
+    }
+
+    // Helper function to convert QuestionnaireResponse to ResourceData
+    private fun QuestionnaireResponse.toResourceData(): AllPatientsResourceData {
+        return AllPatientsResourceData(
+            id = id,
+            meta = meta,
+            resourceType = AllPatientsResourceType.QuestionnaireResponse,
+            questionnaireResponse = this
+        )
+    }
+
+    // Helper function to convert Patient2 to ResourceData
+    private fun Patient2.toResourceData(): AllPatientsResourceData {
+        return AllPatientsResourceData(
+            id = UUID.randomUUID().toString(),
+            meta = Meta().apply { lastUpdated = Date() },
+            resourceType = AllPatientsResourceType.Patient2,
+            patient2 = this
+        )
+    }
+
+    /**
+     * The practitioner every register query filters `general-practitioner` by.
+     *
+     * This must be the Practitioner **logical id**, not the login username. Those are equal only on
+     * older accounts: newer ones are created with a server-generated UUID, so `flwtestim5` logs in
+     * with that username while its Practitioner resource is
+     * `41267729-587e-4857-a7ce-e8d467e9c758`. The sync downloads patients filtered by the logical id
+     * and [QuestionnaireViewModel.getUserName] stamps `generalPractitioner` with it too, so a
+     * register searching by username matched nothing on those accounts — the first-time sync
+     * completed, the patients were on the device, and the register stayed empty.
+     *
+     * Returns an empty string when no practitioner id is stored, which matches no patient. That is
+     * the honest result: the previous "Guest" fallback silently searched for `Practitioner/Guest`
+     * and looked identical to "this user has no cases".
+     */
+    fun getUserName(): String {
+        val practitionerId = secureSharedPreference.getPractitionerUserId()
+        if (practitionerId.isEmpty()) {
+            Timber.w("No practitioner id stored; register queries will return no patients")
+        }
+        return practitionerId
+    }
+
+    /**
+     * The FLW's login username, for showing to the FLW.
+     *
+     * Deliberately separate from [getUserName]: that one returns the Practitioner logical id every
+     * FHIR query filters by, which on newer accounts is a server-generated UUID — correct for a
+     * query, meaningless to someone reading their own profile.
+     */
+    fun getDisplayUserName(): String =
+        secureSharedPreference.retrieveSessionUsername().orEmpty()
+
+    // ResourceData class with all three types and meta information
+    data class AllPatientsResourceData(
+        val id: String,
+        val meta: Meta,
+        val resourceType: AllPatientsResourceType,
+        val patient: Patient? = null,
+        val questionnaireResponse: QuestionnaireResponse? = null,
+        val patient2: Patient2? = null
+    )
+
+    // Enumeration for resource types
+    enum class AllPatientsResourceType {
+        Patient,
+        QuestionnaireResponse,
+        Patient2
+    }
+
+    fun setPermissionGranted(value: Boolean) {
+        _permissionGranted.value = value
+    }
+}
+
+enum class DocumentReferenceCaseType(val label: String) {
+    DRAFT("DRAFT"),
+    SUBMITTED("SUBMITTED")
+}

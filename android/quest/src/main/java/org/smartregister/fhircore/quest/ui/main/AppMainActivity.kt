@@ -1,0 +1,404 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.main
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.core.os.bundleOf
+import androidx.lifecycle.lifecycleScope
+import androidx.navigation.NavController
+import androidx.navigation.fragment.NavHostFragment
+import com.google.android.fhir.FhirEngine
+import com.google.android.fhir.sync.CurrentSyncJobStatus
+import com.google.android.material.bottomnavigation.BottomNavigationView
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import org.hl7.fhir.r4.model.IdType
+import org.hl7.fhir.r4.model.QuestionnaireResponse
+import org.smartregister.fhircore.engine.configuration.QuestionnaireConfig
+import org.smartregister.fhircore.engine.configuration.app.ConfigService
+import org.smartregister.fhircore.engine.configuration.workflow.ActionTrigger
+import org.smartregister.fhircore.engine.sync.OnSyncListener
+import org.smartregister.fhircore.engine.sync.SyncBroadcaster
+import org.smartregister.fhircore.engine.sync.SyncListenerManager
+import org.smartregister.fhircore.engine.ui.base.BaseMultiLanguageActivity
+import org.smartregister.fhircore.engine.ui.theme.AppTheme
+import org.smartregister.fhircore.engine.util.DefaultDispatcherProvider
+import org.smartregister.fhircore.engine.util.extension.applyWindowInsetListener
+import org.smartregister.fhircore.engine.util.extension.isDeviceOnline
+import org.smartregister.fhircore.engine.util.extension.launchActivityWithNoBackStackHistory
+import org.smartregister.fhircore.engine.util.extension.parcelable
+import org.smartregister.fhircore.engine.util.extension.serializable
+import org.smartregister.fhircore.engine.util.extension.showToast
+import org.smartregister.fhircore.geowidget.model.GeoWidgetEvent
+import org.smartregister.fhircore.geowidget.screens.GeoWidgetViewModel
+import org.smartregister.fhircore.quest.R
+import org.smartregister.fhircore.quest.event.AppEvent
+import org.smartregister.fhircore.quest.event.EventBus
+import org.smartregister.fhircore.quest.navigation.NavigationArg
+import org.smartregister.fhircore.quest.ui.appsetting.AppSettingActivity
+import org.smartregister.fhircore.quest.ui.main.appupdate.AppUpdatePrompt
+import org.smartregister.fhircore.quest.ui.main.appupdate.launchAppStore
+import org.smartregister.fhircore.quest.ui.main.components.SyncProgressBar
+import org.smartregister.fhircore.quest.ui.questionnaire.QuestionnaireActivity
+import org.smartregister.fhircore.quest.ui.shared.QuestionnaireHandler
+import org.smartregister.fhircore.quest.ui.shared.models.QuestionnaireSubmission
+import timber.log.Timber
+import javax.inject.Inject
+
+@AndroidEntryPoint
+@ExperimentalMaterialApi
+open class AppMainActivity() : BaseMultiLanguageActivity(), QuestionnaireHandler, OnSyncListener {
+
+  @Inject lateinit var dispatcherProvider: DefaultDispatcherProvider
+
+  @Inject lateinit var configService: ConfigService
+
+  @Inject lateinit var syncListenerManager: SyncListenerManager
+
+  @Inject lateinit var syncBroadcaster: SyncBroadcaster
+
+  @Inject lateinit var fhirEngine: FhirEngine
+
+  @Inject lateinit var eventBus: EventBus
+  lateinit var navHostFragment: NavHostFragment
+  val appMainViewModel by viewModels<AppMainViewModel>()
+  private val geoWidgetViewModel by viewModels<GeoWidgetViewModel>()
+  lateinit var navController: NavController
+  private lateinit var bottomNavigationView: BottomNavigationView
+  // Network connectivity state flow
+  private val _isOnline = MutableStateFlow(true)
+  val isOnline: StateFlow<Boolean> = _isOnline
+
+  // Network callback for real-time connectivity updates
+  private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+    override fun onAvailable(network: Network) {
+      super.onAvailable(network)
+      _isOnline.value = true
+    }
+
+    override fun onLost(network: Network) {
+      super.onLost(network)
+      _isOnline.value = false
+    }
+  }
+
+  // onCreate can return early (before registering the callback) when the app configuration is not
+  // loaded, so onDestroy must only unregister when we actually registered — otherwise
+  // unregisterNetworkCallback throws IllegalArgumentException and masks the real first failure.
+  private var networkCallbackRegistered = false
+
+  override val startForResult =
+    registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { activityResult ->
+      if (activityResult.resultCode == RESULT_OK) {
+        lifecycleScope.launch { onSubmitQuestionnaire(activityResult) }
+      }
+    }
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+
+    // After process death (e.g. the process is killed while the app is idle/screen-locked and is
+    // later recreated by the OS or by a background WorkManager job), the OS can restore this
+    // activity directly without going through the AppSettingActivity bootstrap that loads the
+    // application configuration into memory. In that state every retrieveConfiguration(...) call
+    // below throws NoSuchElementException, which would leave the user on a blank white screen.
+    // Detect the missing configuration and restart from the app's entry point, which
+    // reloads the configuration (from the local database) before navigating back here.
+    if (!appMainViewModel.isApplicationConfigurationLoaded()) {
+      Timber.w("Application configuration not loaded (process recreated); restarting bootstrap")
+      launchActivityWithNoBackStackHistory<AppSettingActivity>()
+      return
+    }
+
+    setContentView(R.layout.activity_main)
+    // Preserve the pre-edge-to-edge look now that Android 16 (targetSdk 36) enforces edge-to-edge
+    // and no longer honors windowOptOutEdgeToEdgeEnforcement. Keeps the bottom navigation above the
+    // gesture bar and content below the status bar.
+    applyWindowInsetListener()
+    _isOnline.value = isDeviceOnline()
+
+    val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    connectivityManager.registerDefaultNetworkCallback(networkCallback)
+    networkCallbackRegistered = true
+
+    val topMenuConfig = appMainViewModel.navigationConfiguration.clientRegisters.firstOrNull()
+    val topMenuConfigId =
+      topMenuConfig?.actions?.firstOrNull { it.trigger == ActionTrigger.ON_CLICK }?.id ?: topMenuConfig?.id
+    bottomNavigationView = findViewById<BottomNavigationView>(R.id.bottom_navigation)
+
+    val fragmentManager = supportFragmentManager
+    navHostFragment = fragmentManager.findFragmentById(R.id.nav_host_fragment) as NavHostFragment?
+      ?: NavHostFragment.create(R.navigation.application_nav_graph, bundleOf(
+        NavigationArg.SCREEN_TITLE to topMenuConfig?.display,
+        NavigationArg.REGISTER_ID to topMenuConfigId,
+      )).also {
+        fragmentManager.beginTransaction()
+          .replace(R.id.nav_host_fragment, it)
+          .setPrimaryNavigationFragment(it)
+          .commitNow()
+      }
+    navController = navHostFragment.navController
+    setupBottomNavigation()
+    setupSyncProgressBar()
+    setupAppUpdatePrompt()
+    appMainViewModel.checkForAppUpdate()
+    geoWidgetViewModel.geoWidgetEventLiveData.observe(this) { geoWidgetEvent ->
+      when (geoWidgetEvent) {
+        is GeoWidgetEvent.OpenProfile ->
+          appMainViewModel.launchProfileFromGeoWidget(
+            navHostFragment.navController,
+            geoWidgetEvent.geoWidgetConfiguration.id,
+            geoWidgetEvent.data,
+          )
+        is GeoWidgetEvent.RegisterClient ->
+          appMainViewModel.launchFamilyRegistrationWithLocationId(
+            context = this,
+            locationId = geoWidgetEvent.data,
+            questionnaireConfig = geoWidgetEvent.questionnaire,
+          )
+      }
+    }
+
+    syncListenerManager.registerSyncListener(this, lifecycle)
+
+    appMainViewModel.run {
+      lifecycleScope.launch {
+//        retrieveAppMainUiState()
+        if (isDeviceOnline()) {
+          appMainViewModel.setPostHogUserProperties()
+          // Collects sync statuses for the lifetime of this activity and so never returns; nothing
+          // may be added after it inside this coroutine.
+          syncBroadcaster.schedulePeriodicSync(applicationConfiguration.syncInterval)
+        } else {
+          showToast(
+            getString(org.smartregister.fhircore.engine.R.string.sync_failed),
+            Toast.LENGTH_LONG,
+          )
+        }
+      }
+      lifecycleScope.launch { resumeIncompleteFirstTimeSync(this@AppMainActivity) }
+      schedulePeriodicJobs()
+    }
+    startSyncIfRequested(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    startSyncIfRequested(intent)
+  }
+
+  /**
+   * "Sync now" from another screen (the logout pending-sync dialog) returns here with
+   * [EXTRA_START_SYNC]. The sync is started from this activity's view model so it outlives the
+   * screen that asked for it and drives this screen's sync indicator and progress bar.
+   */
+  private fun startSyncIfRequested(intent: Intent?) {
+    if (intent?.getBooleanExtra(EXTRA_START_SYNC, false) != true) return
+    intent.removeExtra(EXTRA_START_SYNC)
+    appMainViewModel.onEvent(AppMainEvent.SyncData(this), isForeground = true)
+  }
+
+  private fun setupSyncProgressBar() {
+    findViewById<ComposeView>(R.id.sync_progress_bar).apply {
+      setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+      setContent {
+        AppTheme {
+          val syncProgressUiState by appMainViewModel.syncProgressStateFlow.collectAsState()
+          SyncProgressBar(syncProgressUiState = syncProgressUiState)
+        }
+      }
+    }
+  }
+
+  /**
+   * Hosts the **forced** (blocking) update dialog only. The soft update is a non-blocking nudge
+   * rendered on the register screen (see `SoftUpdateBanner`), so it does not belong in this overlay.
+   */
+  private fun setupAppUpdatePrompt() {
+    findViewById<ComposeView>(R.id.app_update_overlay).apply {
+      setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+      setContent {
+        AppTheme {
+          val appUpdateUiState by appMainViewModel.appUpdateUiState.collectAsState()
+          AppUpdatePrompt(
+            uiState = appUpdateUiState,
+            onUpdate = { launchAppStore(this@AppMainActivity) },
+          )
+        }
+      }
+    }
+  }
+
+  private fun setupBottomNavigation() {
+    val topMenuConfig = appMainViewModel.navigationConfiguration.clientRegisters.firstOrNull()
+    val topMenuConfigId =
+      topMenuConfig?.actions?.firstOrNull { it.trigger == ActionTrigger.ON_CLICK }?.id ?: topMenuConfig?.id
+    bottomNavigationView.setOnItemReselectedListener {  }
+
+    bottomNavigationView.setOnItemSelectedListener { item ->
+      when (item.itemId) {
+        R.id.navigation_register -> {
+          if (navController.currentDestination?.id != R.id.registerFragment) {
+            navController.popBackStack(R.id.registerFragment, false)
+            navController.navigate(
+              R.id.registerFragment,
+              bundleOf(
+                NavigationArg.SCREEN_TITLE to topMenuConfig?.display,
+                NavigationArg.REGISTER_ID to topMenuConfigId,
+              )
+            )
+          }
+          true
+        }
+        R.id.navigation_tasks -> {
+          if (navController.currentDestination?.id != R.id.tasksFragment) {
+            navController.popBackStack(R.id.tasksFragment, false)
+            navController.navigate(R.id.tasksFragment)
+          }
+          true
+        }
+        R.id.navigation_dashboard -> {
+          if (navController.currentDestination?.id != R.id.dashboardFragment) {
+            navController.popBackStack(R.id.dashboardFragment, false)
+            navController.navigate(R.id.dashboardFragment)
+          }
+          true
+        }
+        else -> false
+      }
+    }
+
+    navController.addOnDestinationChangedListener { _, destination, _ ->
+      when (destination.id) {
+        R.id.registerFragment -> bottomNavigationView.menu.findItem(R.id.navigation_register)?.isChecked = true
+        R.id.tasksFragment -> bottomNavigationView.menu.findItem(R.id.navigation_tasks)?.isChecked = true
+        R.id.dashboardFragment -> bottomNavigationView.menu.findItem(R.id.navigation_dashboard)?.isChecked = true
+      }
+    }
+  }
+
+  override fun onBackPressed() {
+    if (navController.currentDestination?.id == R.id.registerFragment) {
+      super.onBackPressed()
+    } else {
+      navController.popBackStack()
+    }
+  }
+
+  override fun onResume() {
+    super.onResume()
+    syncListenerManager.registerSyncListener(this, lifecycle)
+  }
+
+  override fun onPause() {
+    super.onPause()
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    // Unregister the network callback when the activity is destroyed, but only if it was registered
+    // (onCreate can return early before registering). Guarded so teardown never throws.
+    if (networkCallbackRegistered) {
+      val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+      runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
+        .onFailure { Timber.w(it, "Network callback was already unregistered") }
+      networkCallbackRegistered = false
+    }
+  }
+
+  override suspend fun onSubmitQuestionnaire(activityResult: ActivityResult) {
+    if (activityResult.resultCode == RESULT_OK) {
+      val questionnaireResponse: QuestionnaireResponse? =
+        activityResult.data?.serializable(QuestionnaireActivity.QUESTIONNAIRE_RESPONSE)
+          as QuestionnaireResponse?
+      val extractedResourceIds =
+        activityResult.data?.serializable(
+          QuestionnaireActivity.QUESTIONNAIRE_SUBMISSION_EXTRACTED_RESOURCE_IDS,
+        ) as List<IdType>? ?: emptyList()
+      val questionnaireConfig =
+        activityResult.data?.parcelable(QuestionnaireActivity.QUESTIONNAIRE_CONFIG)
+          as QuestionnaireConfig?
+
+      if (questionnaireConfig != null && questionnaireResponse != null) {
+        eventBus.triggerEvent(
+          AppEvent.OnSubmitQuestionnaire(
+            QuestionnaireSubmission(
+              questionnaireConfig = questionnaireConfig,
+              questionnaireResponse = questionnaireResponse,
+              extractedResourceIds = extractedResourceIds,
+            ),
+          ),
+        )
+      } else Timber.e("QuestionnaireConfig & QuestionnaireResponse are both null")
+    }
+  }
+
+  override fun onSync(syncJobStatus: CurrentSyncJobStatus) {
+//    Timber.e("App Main Activity TAG onSync --> $syncJobStatus")
+    // Drive the non-blocking floating progress bar (shown above the bottom nav) for every status.
+    appMainViewModel.updateSyncProgress(syncJobStatus)
+    when (syncJobStatus) {
+      is CurrentSyncJobStatus.Succeeded -> {
+        appMainViewModel.run {
+          onEvent(
+            AppMainEvent.UpdateSyncState(
+              state = syncJobStatus,
+              lastSyncTime = formatLastSyncTimestamp(syncJobStatus.timestamp),
+            ),
+          )
+          // A sync may have pulled a new app-update flag (e.g. a release flipped to forced);
+          // re-resolve so the prompt appears without waiting for the next app launch.
+          checkForAppUpdate()
+        }
+      }
+      is CurrentSyncJobStatus.Failed -> {
+        appMainViewModel.run {
+          onEvent(
+            AppMainEvent.UpdateSyncState(
+              state = syncJobStatus,
+              lastSyncTime = formatLastSyncTimestamp(syncJobStatus.timestamp),
+            ),
+          )
+        }
+      }
+      else -> {
+        // Do nothing
+      }
+    }
+  }
+
+  companion object {
+    /** Starts a foreground sync when this activity is opened or brought back with it. */
+    const val EXTRA_START_SYNC = "extraStartSync"
+  }
+}

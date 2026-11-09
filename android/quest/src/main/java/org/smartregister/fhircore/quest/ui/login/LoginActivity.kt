@@ -1,0 +1,137 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.login
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.annotation.VisibleForTesting
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.core.os.bundleOf
+import androidx.work.WorkManager
+import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
+import org.smartregister.fhircore.engine.data.remote.shared.TokenAuthenticator
+import org.smartregister.fhircore.engine.sync.AppSyncWorker
+import org.smartregister.fhircore.engine.ui.base.BaseMultiLanguageActivity
+import org.smartregister.fhircore.engine.ui.theme.AppTheme
+import org.smartregister.fhircore.engine.util.extension.applyWindowInsetListener
+import org.smartregister.fhircore.engine.util.extension.isDeviceOnline
+import org.smartregister.fhircore.engine.util.extension.launchActivityWithNoBackStackHistory
+import org.smartregister.fhircore.quest.ui.appsetting.AppSettingActivity
+import org.smartregister.fhircore.quest.ui.main.AppMainActivity
+import org.smartregister.fhircore.quest.ui.pin.PinLoginActivity
+import timber.log.Timber
+
+@AndroidEntryPoint
+open class LoginActivity : BaseMultiLanguageActivity() {
+
+  @Inject lateinit var workManager: WorkManager
+  val loginViewModel by viewModels<LoginViewModel>()
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    this.applyWindowInsetListener()
+
+    // After process death the OS can recreate this activity directly, bypassing the
+    // AppSettingActivity bootstrap that loads the application configuration into memory. In that
+    // state reading the application configuration (e.g. pinEnabled() in navigateToScreen() below)
+    // throws NoSuchElementException ("Key application is missing in the map"). Detect the missing
+    // configuration and restart from the app's entry point, which reloads it from the local
+    // database before navigating back here.
+    if (!loginViewModel.isApplicationConfigurationLoaded()) {
+      Timber.w("Application configuration not loaded (process recreated); restarting bootstrap")
+      launchActivityWithNoBackStackHistory<AppSettingActivity>()
+      return
+    }
+
+    // Cancel sync background job to get new auth token; login required, refresh token expired
+    val cancelBackgroundSync =
+      intent.extras?.getBoolean(TokenAuthenticator.CANCEL_BACKGROUND_SYNC, false) ?: false
+    if (cancelBackgroundSync) workManager.cancelAllWorkByTag(AppSyncWorker::class.java.name)
+
+    navigateToScreen()
+    setContent { AppTheme { LoginScreen(loginViewModel = loginViewModel) } }
+  }
+
+  @VisibleForTesting
+  fun navigateToScreen() {
+    loginViewModel.apply {
+      val loginActivity = this@LoginActivity
+      val isPinEnabled = pinEnabled()
+      val hasActivePin = pinActive()
+
+      // Navigate to PinLogin if needed
+      if (isPinEnabled && hasActivePin) {
+        if ((loginActivity.deviceOnline() && loginActivity.isRefreshTokenActive()) ||
+          !loginActivity.deviceOnline()
+        ) {
+          navigateToPinLogin(launchSetup = false)
+          return
+        }
+      }
+
+      // Observer to handle navigation to Home
+      navigateToHome.observe(loginActivity) { launchHomeScreen ->
+        if (launchHomeScreen) {
+          downloadNowWorkflowConfigs(isInitialLogin = false)
+          if (isPinEnabled && !hasActivePin) {
+            navigateToPinLogin(launchSetup = true)
+          } else {
+            loginActivity.navigateToHome()
+          }
+        }
+      }
+
+      // Observer to handle launching the dial pad
+      launchDialPad.observe(loginActivity) { dialPadNumber ->
+        if (!dialPadNumber.isNullOrEmpty()) {
+          launchDialPad(dialPadNumber)
+        }
+      }
+    }
+  }
+
+
+  @VisibleForTesting open fun pinEnabled() = loginViewModel.isPinEnabled()
+
+  @VisibleForTesting
+  open fun pinActive() = !loginViewModel.secureSharedPreference.retrieveSessionPin().isNullOrEmpty()
+
+  @VisibleForTesting
+  open fun isRefreshTokenActive() = loginViewModel.tokenAuthenticator.isCurrentRefreshTokenActive()
+
+  @VisibleForTesting open fun deviceOnline() = isDeviceOnline()
+
+  @OptIn(ExperimentalMaterialApi::class)
+  fun navigateToHome() {
+    startActivity(Intent(this, AppMainActivity::class.java))
+    finish()
+  }
+
+  private fun navigateToPinLogin(launchSetup: Boolean = false) {
+    this.launchActivityWithNoBackStackHistory<PinLoginActivity>(
+      bundle = bundleOf(Pair(PinLoginActivity.PIN_SETUP, launchSetup)),
+    )
+  }
+
+  private fun launchDialPad(phone: String) {
+    startActivity(Intent(Intent.ACTION_DIAL).apply { data = Uri.parse(phone) })
+  }
+}

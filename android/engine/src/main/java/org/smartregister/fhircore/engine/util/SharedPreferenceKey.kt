@@ -1,0 +1,61 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.engine.util
+
+enum class SharedPreferenceKey {
+  APP_ID,
+  LAST_SYNC_TIMESTAMP,
+  LANG,
+  PRACTITIONER_ID,
+  PRACTITIONER_USER_ID,
+  PRACTITIONER_USER_ID_ISSUE_FIXED,
+  PRACTITIONER_DETAILS,
+  PRACTITIONER_LOCATION_HIERARCHIES,
+  PRACTITIONER_LOCATION,
+  REMOTE_SYNC_RESOURCES,
+  LOGIN_CREDENTIAL_KEY,
+  LOGIN_PIN_KEY,
+  LOGIN_PIN_SALT,
+  LAST_OFFSET,
+  USER_INFO,
+  CARE_TEAM,
+  ORGANIZATION,
+  FHIR_BASE_URL,
+  SITE_NAME,
+  OAUTH_BASE_URL,
+  TENANT_CODE,
+  IS_MULTI_TENANT,
+  FLW_DISTRICT,
+  FLW_STATE,
+  DRAFTS,
+  KEY_LANGUAGE,
+  KEY_LANGUAGE_CODE,
+  LAST_SYNC_DATE_TIME,
+
+  /**
+   * Ids of DocumentReferences confirmed on the server before being purged locally.
+   *
+   * @see org.smartregister.fhircore.engine.util.UploadedDocumentReferenceLedger
+   */
+  UPLOADED_DOCUMENT_REFERENCES,
+
+  /**
+   * Set when the last session logged out with nothing left to sync, which is the only state in
+   * which a different user may log in on this device.
+   */
+  USER_SWITCH_ALLOWED,
+}

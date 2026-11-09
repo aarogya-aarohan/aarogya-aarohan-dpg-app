@@ -1,0 +1,376 @@
+<resources xmlns:ns1="http://schemas.android.com/apk/res-auto">
+    <string name="back_to_clients">Back to client list</string>
+    <string name="test_results">Test Results</string>
+
+    <string name="edit_patient_info">Edit Info</string>
+
+    <string name="menu_clients">Clients</string>
+    <string name="menu_settings">Settings</string>
+
+
+    <string name="cannot_find_parent_questionnaire">Cannot find the parent Questionnaire!</string>
+    <!-- Overrides for org.smartregister:data-capture library string resources -->
+    <string name="button_review">Review</string>
+    <string name="note">Note</string>
+    <string name="validation_dialogue_note">Please fill in all the required fields to continue.</string>
+    <string name="max_size_file_above_limit_validation_error_msg">Error: File size is larger than %1$s MB</string>
+    <string name="max_size_image_above_limit_validation_error_msg">Error: Image size is larger than %1$s MB</string>
+    <string name="max_value_validation_error_msg">Maximum value allowed is:<ns1:g id="max_value">%1$s</ns1:g> </string>
+    <string name="mime_type_wrong_media_format_validation_error_msg">Error: Wrong media format</string>
+    <string name="min_length_validation_error_msg">The minimum number of characters that are permitted in the answer is: <ns1:g id="min_length">%1$s</ns1:g>  </string>
+    <string name="min_value_validation_error_msg">Minimum value allowed is:<ns1:g id="min_value">%1$s</ns1:g> </string>
+    <string name="multi_select_dialog_subtitle">Select all that apply</string>
+    <string name="take_photo">Take Photo</string>
+    <string name="time">Time</string>
+    <string name="upload_audio">Upload Audio</string>
+    <string name="add_photo">Add photo</string>
+    <string name="upload_document">Upload Document</string>
+    <string name="upload_failed">Upload failed</string>
+    <string name="image_capture_failed">Image capture failed</string>
+    <string name="processing_image">Processing image…</string>
+    <string name="upload_file">Upload File</string>
+    <string name="upload_photo">Upload Photo</string>
+    <string name="upload_video">Upload Video</string>
+    <string name="uploaded">Uploaded</string>
+    <string name="video_deleted">Video deleted</string>
+    <string name="video_uploaded">Video uploaded</string>
+    <string name="audio_deleted">Audio deleted</string>
+    <string name="audio_uploaded">Audio uploaded</string>
+
+
+    <string name="loading_forms">Loading forms …</string>
+    <string name="loading_responses">Loading responses …</string>
+    <string name="loading_patients">Loading cases …</string>
+    <string name="no_test_results_found">No test results found</string>
+    <string name="patient_test_results">TEST RESULTS</string>
+    <string name="last_test"> Last Test - %1$s</string>
+    <string name="sample_distance" translatable="false">2.4 km</string>
+    <string name="hash_sign" translatable="false">#</string>
+    <string name="menu_tasks">Tasks</string>
+    <string name="household">Household</string>
+    <string name="routine_visit">Routine visit</string>
+    <string name="anc_visit">ANC visit</string>
+    <string name="at_risk">At risk</string>
+    <string name="no_tasks">No tasks</string>
+    <string name="add_member">ADD MEMBER</string>
+    <string name="what_to_do">What do you want to do?</string>
+
+    <!--Overflow menu strings -->
+    <string name="view_profile">View profile</string>
+    <string name="family_details">Family details</string>
+    <string name="change_family_head">Change family head</string>
+    <string name="change_primary_caregiver">Change primary caregiver</string>
+    <string name="family_activity">Family activity</string>
+    <string name="view_past_encounters">View past encounters</string>
+    <string name="remove_family">Remove family</string>
+    <string name="family_suffix">%1$s Family</string>
+    <string name="remove_this_person">Remove this person</string>
+    <string name="individual_details">Individual details</string>
+    <string name="view_family">View family</string>
+    <string name="record_sick_child">Record sick child</string>
+
+    <!-- SideMenu option strings-->
+    <string name="device_to_device_sync">Device to device sync</string>
+    <string name="anc_clients">ANC Clients</string>
+    <string name="all_clients">All Clients</string>
+    <string name="pnc_clients">PNC Clients</string>
+    <string name="hiv_clients">Clients List</string>
+    <string name="phone_tracing_clients">Phone Tracing</string>
+    <string name="home_tracing_clients">Home Tracing</string>
+    <string name="appointment_clients">Appointments</string>
+    <string name="family_planning_clients">Family Planning Clients</string>
+    <string name="households">Households</string>
+    <string name="children">Children</string>
+
+    <!--remove family questionnaire strings-->
+    <string name="remove_family_warning">Removing %1$s will remove their entire health record from your device. This action can’t be undone.</string>
+
+    <!--remove family member questionnaire strings-->
+    <string name="remove_family_member_warning">%1$s will be removed permanently from this family. This action can’t be undone.</string>
+    <string name="remove_member">Remove member</string>
+
+    <!--Reporting strings -->
+    <string name="date_range">Date range</string>
+    <string name="change">Change</string>
+    <string name="all">All</string>
+    <string name="individual">Individual</string>
+    <string name="please_wait">Please wait…</string>
+    <string name="patient">Patient</string>
+    <string name="subject">Subject</string>
+    <string name="generate_report">GENERATE REPORT</string>
+    <string name="select_patient">SELECT PATIENT</string>
+    <string name="select_subject">SELECT SUBJECT</string>
+    <string name="start_date">Start date</string>
+    <string name="end_date">End date</string>
+    <string name="select_date">Select dates</string>
+
+    <!--Change family head strings -->
+    <string name="no_eligible_family_members">No eligible family members found for family head.</string>
+    <string name="label_select_new_head">Select a new family head</string>
+    <string name="label_assign_new_family_head">Assign new family head</string>
+    <string name="alert_message_abort_operation">Are you sure you want to abort this operation?</string>
+
+    <!-- Dialog alert messages-->
+    <string name="unsaved_changes_message_alert">If you leave before saving, your edits or changes will be lost</string>
+    <string name="visit_due_on">%1$s due on %2$s</string>
+    <string name="visit_due_today">%1$s due today</string>
+    <string name="visit_overdue">%1$s overdue %2$s ago</string>
+    <string name="record_as_anc">Record as ANC</string>
+    <string name="pregnancy_outcome">Pregnancy Outcome</string>
+    <string name="registers">Registers</string>
+
+    <string name="questionnaire_response_name" translatable="false">%1$s (%2$s)</string>
+    <string name="due_on">Due on %1$s</string>
+
+    <string name="geo_widget_fragment_destination" translatable="false">GeoWidget Fragment Destination</string>
+
+    <string name="structuremap_failed">Failed to extract resources for %1$s</string>
+    <string name="structure_map_missing_message">Missing StructureMap for Questionnaire , QuestionnaireResponse saved</string>
+    <string name="structure_success">Successfully extracted resources for %1$s</string>
+    <string name="reassigned_managing_entity">Managing entity reassigned successfully</string>
+    <string name="error_fetching_user_details">Failed to fetch user details</string>
+    <string name="questionnaire_not_found">This form is still being downloaded. Please wait for the sync to finish and try again.</string>
+    <string name="no_visits">No visits</string>
+    <string name="questionnaire_response_invalid">Please update the fields properly before submitting</string>
+    <string name="submission_blocked_title">Case not submitted</string>
+    <string name="submission_blocked_message">These required questions still need an answer:\n\n%1$s\n\nPlease fill them in and submit again.</string>
+    <string name="questionnaire_submission_failed">Something went wrong while saving the case. Please close the form and check the register before trying again.</string>
+    <string name="submission_in_progress">Saving the case… please wait.</string>
+    <string name="app_version_tag_url" translatable="false">https://smartregister.org/app-version</string>
+    <string name="application_version" translatable="false">Application Version</string>
+    <string name="missing_subject_type">Missing subject type on questionnaire. Provide Questionnaire.subjectType to resolve.</string>
+    <string name="missing_questionnaire_config">QuestionnaireConfig is required but missing.</string>
+    <string name="error_populating_questionnaire">Error populating some questionnaire fields. Invalid QuestionnaireResponse.</string>
+    <string name="extraction_in_progress">Processing questionnaire data…</string>
+    <string name="loading_questionnaire">Loading questionnaire…</string>
+    <string name="clear_all">Clear All</string>
+    <string name="yes">Yes</string>
+    <string name="no">No</string>
+
+    <string name="location_permissions_denied">Location Access Denied: To capture location, enable location permissions in device settings.</string>
+    <string name="camera_permissions_denied">Permissions Denied: To capture photos, enable camera permissions in device settings.</string>
+    <string name="location_services_disabled">Location services are disabled. Do you want to enable them?</string>
+    <string name="copy_text_success_message">Link %1$s copied successfully</string>
+    <!-- TODO: Remove or change this placeholder text -->
+    <string name="hello_blank_fragment">Hello blank fragment</string>
+    <string name="required_text_and_new_line">Please fill the required field</string>
+    <string name="retake">RETAKE</string>
+    <string name="done">DONE</string>
+    <string name="no_unsync_patients">There are no unsynced cases.</string>
+    <string name="no_draft_patients">you don\'t have any saved drafts</string>
+    <string name="no_patients_added">No cases submitted yet</string>
+    <string name="delete_draft_desc">Are you sure you want to delete the record?</string>
+    <string name="delete_draft_title">Delete record</string>
+    <string name="loading_followups">Loading cases</string>
+    <string name="no_followups">No new cases</string>
+    <string name="update_status">UPDATE STATUS</string>
+    <string name="update">UPDATE</string>
+    <string name="select_language">SELECT LANGUAGE</string>
+    <string name="cancel">CANCEL</string>
+    <string name="close">CLOSE</string>
+    <string name="no_cases">No matching recommendations found!</string>
+    <string name="not_contacted">NOT CONTACTED</string>
+    <string name="not_responded">NOT RESPONDED</string>
+    <string name="add_patient">Add New Case</string>
+
+    <string name="pending_agreed_not_done">AGREED, FOLLOWUP NOT DONE</string>
+    <string name="pending_not_agreed">NOT AGREED FOR FOLLOWUP</string>
+    <string name="recenty_submitted_label">RECENTLY SUBMITTED</string>
+    <string name="draft">DRAFTS</string>
+    <string name="add_case">Add Case</string>
+    <string name="not_agrred_empty_label">Nothing in not agreed for follow up</string>
+    <string name="not_responded_empty_label">Nothing in not responded</string>
+    <string name="not_contacted_empty_label">Nothing in not contacted</string>
+    <string name="agrred_not_done_empty_label">Nothing in agreed but followup not done</string>
+    <string name="completed_empty_label">Nothing in completed cases</string>
+
+    <string name="kle_dental_sciences">KLE Society’s Institute of Dental Sciences, Bangalore</string>
+    <string name="aiims_delhi">AIIMS, Delhi</string>
+    <string name="nci_jhajjar">NCI, Jhajjar</string>
+    <string name="msmf_bangalore">MSMF, Narayana Hrudayalaya Health City, Bangalore</string>
+    <string name="msmc_bangalore">MSMC, Narayana Hrudayalaya Health City, Bangalore</string>
+    <string name="public_health_krishnagiri">Public health facilities, Krishnagiri</string>
+    <string name="public_health_thanjavur">Public health facilities, Thanjavur</string>
+    <string name="mpmmcc_varanasi">MPMMCC, Varanasi</string>
+    <string name="cachar_cancer_silchar">Cachar Cancer Hospital and Research Centre, Silchar</string>
+    <string name="dr_borooah_cancer_guwahati">Dr. Bhubaneswar Borooah Cancer Institute, Guwahati</string>
+
+
+    <!-- Districts -->
+    <string name="district_bengaluru">Bengaluru</string>
+    <string name="district_new_delhi">New Delhi</string>
+    <string name="district_bengaluru_rural">Bengaluru Rural</string>
+    <string name="district_krishnagiri">Krishnagiri</string>
+    <string name="district_thanjavur">Thanjavur</string>
+    <string name="district_varanasi">Varanasi</string>
+    <string name="district_cachar">Cachar</string>
+    <string name="district_guwahati">Guwahati</string>
+
+    <!-- States -->
+    <string name="state_karnataka">Karnataka</string>
+    <string name="state_delhi">Delhi</string>
+    <string name="state_tamil_nadu">Tamil Nadu</string>
+    <string name="state_uttar_pradesh">Uttar Pradesh</string>
+    <string name="state_assam">Assam</string>
+
+    <!-- Profile-->
+    <string name="change_password">Change Password</string>
+    <string name="change_language">Change Language</string>
+    <string name="logout">LOGOUT</string>
+    <string name="change_pin">Change PIN</string>
+    <string name="profile_username">Username: %s</string>
+
+    <!-- Cases-->
+    <string name="visited">Visited</string>
+    <string name="unique_id_label">Reference ID</string>
+    <string name="not_available">Not Available</string>
+    <string name="phone_label">Phone</string>
+    <string name="cases_sync">Sync: %s</string>
+    <string name="dynamic_see_more">SEE %s MORE</string>
+    <string name="dynamic_total_drafts">TOTAL DRAFTS: %s</string>
+    <string name="dynamic_visited">Visited %s</string>
+    <string name="created">Created</string>
+    <string name="total_submissions">Total submissions: %s</string>
+    <string name="un_synced_submissions">UN-synced submissions: %s</string>
+    <string name="synced_submissions">synced submissions: %s</string>
+    <string name="nothing_in_un_synced">Nothing in un-synced</string>
+    <string name="cases_no_draft_patients">No cases added yet. Start by adding \n a new cases.</string>
+
+    <!-- Recommendation-->
+    <string name="phone">Phone:</string>
+    <string name="reason">Reason:</string>
+    <string name="add_investigation">ADD INVESTIGATION</string>
+    <string name="urgent_referral">URGENT REFERRAL</string>
+    <string name="retake_photo">RETAKE PHOTO</string>
+    <string name="image_saved">Image Saved</string>
+    <string name="sync_status">Sync Status</string>
+    <string name="case_synced">Case synced</string>
+    <string name="case_sync_pending">Case sync pending</string>
+    <string name="loading_sync_status">Checking sync status…</string>
+    <string name="sync_status_load_failed">Couldn\'t check the current sync status. Try again.</string>
+    <string name="sync_now">Sync now</string>
+    <string name="syncing">Syncing…</string>
+    <string name="sync_in_progress">Please wait, sync is in progress</string>
+    <string name="sync_bar_first_time">Setting up your data…</string>
+    <string name="sync_bar_downloading">Syncing data…</string>
+    <string name="sync_bar_uploading">Uploading images…</string>
+    <string name="sync_bar_in_background">You can keep using the app while this finishes</string>
+    <string name="notification_sync_failed">Sync failed</string>
+    <string name="notification_sync">Syncing…</string>
+    <string name="image_left">Images Left: %s</string>
+    <string name="patients_left">Patients Left: %s</string>
+    <string name="okay">Okay</string>
+
+    <!-- Notification -->
+    <string name="notification_permission_title">Notification Permission</string>
+    <string name="notification_permission_description">Enable notifications to stay informed about the latest data syncs. Ensure your app always has the most current information by allowing timely sync alerts.</string>
+
+    <!-- Menu-->
+    <string name="menu_cases">Cases</string>
+    <string name="menu_recommendations">Recommendations</string>
+    <string name="menu_dashboard">Dashboard</string>
+
+    <!-- Recommendations -->
+    <string name="enter_name_or_phone">Enter name or phone</string>
+    <string name="status_new">New</string>
+    <string name="status_pending">Pending</string>
+    <string name="status_completed">Completed</string>
+
+    <!-- Dashboard -->
+    <string name="health_center">Health Center</string>
+    <string name="total_screened_cases">Total screened cases</string>
+    <string name="today">Today</string>
+    <string name="this_week">This Week</string>
+    <string name="this_month">This Month</string>
+    <string name="dashboard_add_patient">Add new case</string>
+
+    <!-- See All-->
+    <string name="view_all_draft">Drafts</string>
+    <string name="view_all_submissions">All submissions</string>
+
+    <!-- View All-->
+    <string name="view_all">VIEW ALL</string>
+    <string name="view_all_urgent_referral">Urgent Referral</string>
+    <string name="view_all_add_investigation">Add. Investigation</string>
+    <string name="view_all_retake_photo">Retake Photo</string>
+    <string name="view_all_advice_to_quit">Advice To Quit</string>
+    <string name="view_all_advice_to_quit_habit">ADVICE TO QUIT HABIT</string>
+    <string name="view_all_change_status">CHANGE STATUS</string>
+    <string name="view_all_phone">Phone %s</string>
+    <string name="phone_with_space">Phone </string>
+    <string name="view_all_call">Call</string>
+    <string name="view_all_screened_on">Screened on</string>
+    <!-- Toolbar-->
+    <string name="toolbar_recently_added">Recently Added</string>
+
+    <!-- SnackBar-->
+    <string name="status_updated_successfully">Status updated successfully</string>
+    <string name="select_status_to_update">Select the status to update</string>
+
+    <!-- Screen Title-->
+    <string name="not_agreed_for_followup">Did n\'t agree for follow up</string>
+    <string name="agreed_followup_not_done">Agreed, follow up not done</string>
+    <string name="agreed_for_followup">AGREED FOR FOLLOW UP</string>
+    <string name="followup_done">Follow up done</string>
+    <string name="followup_not_done">Follow up not done</string>
+    <!-- Recommendations tab task-card title; mirrors known Task.description server values -->
+    <string name="task_desc_refer_hospital_investigation">Follow up: Refer to hospital for additional investigation</string>
+    <string name="task_desc_retake_photo">Follow up: Retake photo</string>
+    <string name="task_desc_advice_quit_habit">Follow up: Advice to quit the habit</string>
+    <string name="task_desc_specialist_review">Task for specialist to review patient diagnosis</string>
+    <string name="task_desc_specialist_screen">Task for specialist to screen patient</string>
+    <string name="remove_case">Not agreed, remove case</string>
+    <string name="null_status">null</string>
+    <string name="none_status">none</string>
+    <string name="default_status">Default</string>
+    <string name="remove_status">Remove</string>
+    <string name="submit_questionnaire">Submit</string>
+    <string name="button_pagination_next">Next</string>
+    <string name="button_pagination_previous">Previous</string>
+    <string name="location_permission_reason">App needs location permission to capture the site location.</string>
+
+    <string name="ai_result_title">AI Result</string>
+    <string name="suspicious_result">Refer to a dentist</string>
+    <string name="suspicious_result_desc">AI recommends referral. In case \nof doubt, talk to your supervisor.</string>
+    <string name="nonsuspicious_result">No referral required</string>
+    <string name="nonsuspicious_result_desc">AI does not recommend referral. If lesion is visible, refer the case.</string>
+    <string name="ai_detected_lesions">AI-DETECTED LESIONS</string>
+    <string name="none">None</string>
+    <string name="no_lesions_found">No lesions found.</string>
+    <string name="refer_case">STILL REFER?</string>
+    <string name="done_upper">COMPLETE</string>
+
+    <!-- App update prompt -->
+    <string name="app_update_available_title">Update app</string>
+    <string name="app_update_required_title">Critical update required</string>
+    <string name="app_update_soft_message_lead">"A new version is available with latest improvements. "</string>
+    <string name="app_update_soft_message_cta">Click to update.</string>
+    <string name="app_update_forced_message">A newer version of the app is required to continue. Please update.</string>
+    <string name="app_update_action_now">Update now</string>
+    <string name="app_update_dismiss">Dismiss</string>
+    <string name="ai_enable_failed_title">Failed to enable AI</string>
+    <string name="ai_enable_failed_message">AI could not be enabled due to a technical issue. Please try again.</string>
+    <string name="ai_enable_failed_offline">Enabling AI requires internet. Check your connection and try again.</string>
+    <string name="ai_enable_retry">Retry</string>
+    <string name="ai_enabled_successfully">AI is enabled successfully.</string>
+    <string name="extraction_enabled">Extraction Enabled</string>
+    <string name="extraction_disabled">Extraction Disabled</string>
+    <string name="ai_extraction_status">%1$s + %2$s</string>
+    <string name="inconclusive_result">AI could not decide</string>
+    <string name="inconclusive_result_desc">Use your clinical judgement. Retake the photos or refer the case if in doubt.</string>
+    <string name="ai_inconclusive_photos">PHOTOS AI COULD NOT ASSESS</string>
+    <string name="no_photos_assessed">AI could not assess the photos.</string>
+    <string name="refer_case_upper">REFER CASE</string>
+    <string name="ai_model_ready">Model: %1$s %2$s</string>
+    <string name="ai_model_not_installed">No AI model installed</string>
+    <string name="ai_model_failed">AI model failed to load: %1$s</string>
+    <string name="ai_model_ambiguous">Several AI models installed; none selected</string>
+    <plurals name="logout_pending_sync_title">
+        <item quantity="one">%d case pending to sync</item>
+        <item quantity="other">%d cases pending to sync</item>
+    </plurals>
+    <string name="logout_pending_sync_data_title">Data pending to sync</string>
+    <string name="logout_pending_sync_message">Sync your device before logging out to prevent data loss</string>
+    <string name="logout_pending_sync_logout">Log out</string>
+    <string name="dialog_close">Close</string>
+</resources>

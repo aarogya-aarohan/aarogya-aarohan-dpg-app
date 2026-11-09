@@ -1,0 +1,1025 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.quest.ui.questionnaire
+
+import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.location.Location
+import android.os.Bundle
+import android.os.Parcelable
+import android.provider.Settings
+import android.view.View
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.viewModels
+import androidx.core.os.bundleOf
+import androidx.fragment.app.commit
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withStarted
+import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.fhir.datacapture.QuestionnaireFragment
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.launch
+import org.hl7.fhir.r4.model.BooleanType
+import org.hl7.fhir.r4.model.IdType
+import org.hl7.fhir.r4.model.Questionnaire
+import org.hl7.fhir.r4.model.QuestionnaireResponse
+import org.hl7.fhir.r4.model.Reference
+import org.hl7.fhir.r4.model.Resource
+import org.hl7.fhir.r4.model.ResourceType
+import org.hl7.fhir.r4.model.StringType
+import org.smartregister.fhircore.engine.configuration.QuestionnaireConfig
+import org.smartregister.fhircore.engine.configuration.app.LocationLogOptions
+import org.smartregister.fhircore.engine.domain.model.ActionParameter
+import org.smartregister.fhircore.engine.domain.model.ActionParameterType
+import org.smartregister.fhircore.engine.domain.model.isEditable
+import org.smartregister.fhircore.engine.domain.model.isReadOnly
+import org.smartregister.fhircore.engine.ui.base.AlertDialogue
+import org.smartregister.fhircore.engine.ui.base.BaseMultiLanguageActivity
+import org.smartregister.fhircore.engine.util.DispatcherProvider
+import org.smartregister.fhircore.engine.util.SharedPreferenceKey
+import org.smartregister.fhircore.engine.util.analytics.AnalyticsLogger
+import org.smartregister.fhircore.engine.util.extension.applyWindowInsetListener
+import org.smartregister.fhircore.engine.util.extension.clearText
+import org.smartregister.fhircore.engine.util.extension.encodeResourceToString
+import org.smartregister.fhircore.engine.util.extension.logicalId
+import org.smartregister.fhircore.engine.util.extension.parcelable
+import org.smartregister.fhircore.engine.util.extension.parcelableArrayList
+import org.smartregister.fhircore.engine.util.extension.showToast
+import org.smartregister.fhircore.quest.R
+import org.smartregister.fhircore.quest.databinding.QuestionnaireActivityBinding
+import org.smartregister.fhircore.ai.Outcome
+import org.smartregister.fhircore.ai.localized
+import org.smartregister.fhircore.quest.ml.ScreeningEngine
+import org.smartregister.fhircore.quest.util.CASE_LEVEL_AI_CLASS_LINK_ID
+import org.smartregister.fhircore.quest.util.CASE_LEVEL_AI_RESULT_LINK_ID
+import org.smartregister.fhircore.quest.util.DeviceMetrics
+import org.smartregister.fhircore.quest.util.LocationUtils
+import org.smartregister.fhircore.quest.util.PermissionUtils
+import org.smartregister.fhircore.quest.util.REFER_CASE_URL
+import org.smartregister.fhircore.quest.util.ResourceUtils
+import org.smartregister.fhircore.engine.util.FeatureFlagUtil
+import org.smartregister.fhircore.quest.util.PostHogAnalytics
+import org.smartregister.fhircore.quest.util.ScreeningTimer
+import timber.log.Timber
+import java.io.Serializable
+import java.util.LinkedList
+import javax.inject.Inject
+
+private const val FLW_DISTRICT_LINK_ID = "patient-address-district"
+private const val FLW_STATE_LINK_ID = "patient-address-state"
+
+@AndroidEntryPoint
+class QuestionnaireActivity : BaseMultiLanguageActivity() {
+
+  @Inject lateinit var dispatcherProvider: DispatcherProvider
+  @Inject lateinit var featureFlagUtil: FeatureFlagUtil
+  @Inject lateinit var screeningEngine: ScreeningEngine
+  val viewModel by viewModels<QuestionnaireViewModel>()
+  private lateinit var questionnaireConfig: QuestionnaireConfig
+  private lateinit var actionParameters: ArrayList<ActionParameter>
+  private lateinit var viewBinding: QuestionnaireActivityBinding
+  private var questionnaire: Questionnaire? = null
+  private var alertDialog: AlertDialog? = null
+  private lateinit var fusedLocationClient: FusedLocationProviderClient
+  var currentLocation: Location? = null
+  private lateinit var locationPermissionLauncher: ActivityResultLauncher<Array<String>>
+  private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
+  private var questionnaireResponse: String? = null
+  private var currentQR: QuestionnaireResponse? = null
+  private var caseOutcome: Outcome = Outcome.NEGATIVE
+  private val isSuspiciousResult: Boolean
+    get() = caseOutcome == Outcome.POSITIVE
+  private var submissionIdTypes: List<IdType>? = null
+  private var submissionQRResult: QuestionnaireResponse? = null
+  private var screeningId: String? = null
+
+  private val aiResultLauncher =
+    registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      if (result.resultCode == Activity.RESULT_OK) {
+        val referCase = result.data?.getBooleanExtra("refer_case", false) ?: false
+        val aiVerdict = caseOutcome.verdict
+        PostHogAnalytics.capture(
+          PostHogAnalytics.Events.QUESTIONNAIRE_SUBMITTED,
+          questionnaireAnalyticsProps(
+            PostHogAnalytics.Props.REFER_CASE to referCase,
+            PostHogAnalytics.Props.AI_VERDICT to aiVerdict,
+            // Referred although the AI didn't call for it (negative or inconclusive).
+            PostHogAnalytics.Props.AI_OVERRIDDEN to (referCase && !isSuspiciousResult),
+          ),
+        )
+        ScreeningTimer.end(
+          screeningId,
+          outcome = if (referCase) "refer_case" else "submitted",
+          extraProps =
+            screeningCompletionProps(
+              PostHogAnalytics.Props.IS_SUSPICIOUS to isSuspiciousResult,
+            ),
+        )
+
+        if (referCase) {
+          submissionQRResult?.let { qr ->
+            qr.addExtension(REFER_CASE_URL, BooleanType(true))
+            viewModel.updateReferCase(qr.logicalId)
+          }
+        }
+
+        setResult(
+          Activity.RESULT_OK,
+          Intent().apply {
+            putExtra(QUESTIONNAIRE_RESPONSE, submissionQRResult as Serializable)
+            putExtra(QUESTIONNAIRE_SUBMISSION_EXTRACTED_RESOURCE_IDS, submissionIdTypes as Serializable)
+            putExtra(QUESTIONNAIRE_CONFIG, questionnaireConfig as Parcelable)
+          },
+        )
+        finish()
+      } else if (submissionQRResult != null) {
+        // The case was already saved before AIResultActivity was launched, so dismissing that
+        // screen (e.g. system back) cannot undo the submission. Close this activity with the
+        // saved result; returning to the stale form would let the user submit the same case
+        // again and register a duplicate.
+        PostHogAnalytics.capture(
+          PostHogAnalytics.Events.QUESTIONNAIRE_SUBMITTED,
+          questionnaireAnalyticsProps(
+            PostHogAnalytics.Props.REFER_CASE to false,
+            PostHogAnalytics.Props.AI_VERDICT to
+              caseOutcome.verdict,
+            PostHogAnalytics.Props.AI_OVERRIDDEN to false,
+          ),
+        )
+        ScreeningTimer.end(
+          screeningId,
+          outcome = "submitted",
+          extraProps =
+            screeningCompletionProps(
+              PostHogAnalytics.Props.IS_SUSPICIOUS to isSuspiciousResult,
+            ),
+        )
+        setResult(
+          Activity.RESULT_OK,
+          Intent().apply {
+            putExtra(QUESTIONNAIRE_RESPONSE, submissionQRResult as Serializable)
+            putExtra(QUESTIONNAIRE_SUBMISSION_EXTRACTED_RESOURCE_IDS, submissionIdTypes as Serializable)
+            putExtra(QUESTIONNAIRE_CONFIG, questionnaireConfig as Parcelable)
+          },
+        )
+        finish()
+      }
+    }
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+
+    setTheme(org.smartregister.fhircore.engine.R.style.AppTheme_Questionnaire)
+    viewBinding = QuestionnaireActivityBinding.inflate(layoutInflater)
+    setContentView(viewBinding.root)
+    // Preserve the pre-edge-to-edge look now that Android 16 (targetSdk 36) enforces edge-to-edge
+    // and no longer honors windowOptOutEdgeToEdgeEnforcement.
+    applyWindowInsetListener()
+
+    with(intent) {
+      parcelable<QuestionnaireConfig>(QUESTIONNAIRE_CONFIG)?.also { questionnaireConfig = it }
+      actionParameters = parcelableArrayList(QUESTIONNAIRE_ACTION_PARAMETERS) ?: arrayListOf()
+      questionnaireResponse = getStringExtra(QUESTIONNAIRE_RESPONSE_PREFILL)
+    }
+
+    if (!::questionnaireConfig.isInitialized) {
+      showToast(getString(R.string.missing_questionnaire_config))
+      finish()
+      return
+    }
+
+    if (isFreshRegistrationQuestionnaire()) {
+      screeningId = ScreeningTimer.start(DeviceMetrics.batteryPct(this))
+    }
+
+    // Set up the toolbar before anything that can suspend or bail out, so the screen never shows the
+    // layout's design-time defaults. It must not live in renderQuestionnaire(), which is skipped on
+    // a recreated activity and would leave the placeholder title on screen.
+    setupQuestionnaireToolbar()
+
+    viewModel.questionnaireProgressStateLiveData.observe(this) { progressState ->
+      alertDialog =
+        if (progressState?.active == false) {
+          alertDialog?.dismiss()
+          null
+        } else {
+          when (progressState) {
+            is QuestionnaireProgressState.ExtractionInProgress ->
+              AlertDialogue.showProgressAlert(this, R.string.extraction_in_progress)
+            is QuestionnaireProgressState.QuestionnaireLaunch ->
+              AlertDialogue.showProgressAlert(this, R.string.loading_questionnaire)
+            else -> null
+          }
+        }
+    }
+
+    // Always (re)build the form, never only on first creation. Turning on battery saver flips the
+    // system into dark mode, and that `uiMode` configuration change destroys and recreates this
+    // activity; a low-memory kill or a crash restore does the same. `savedInstanceState` is then
+    // non-null, and because onSaveInstanceState() wipes the bundle the FragmentManager has no
+    // QuestionnaireFragment to restore either — so skipping the call left the user on an empty
+    // white container. renderQuestionnaire() is idempotent: it no-ops when the fragment is attached.
+    if (savedInstanceState != null) {
+      Timber.i("QuestionnaireActivity recreated; rebuilding questionnaire ${questionnaireConfig.id}")
+      PostHogAnalytics.capture(
+        PostHogAnalytics.Events.QUESTIONNAIRE_RECREATED,
+        questionnaireAnalyticsProps(),
+      )
+    }
+    renderQuestionnaire()
+
+    PostHogAnalytics.captureScreenView("QuestionnaireActivity")
+    PostHogAnalytics.capture(
+      PostHogAnalytics.Events.QUESTIONNAIRE_OPENED,
+      questionnaireAnalyticsProps(),
+    )
+
+    setupLocationServices()
+
+    this.onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          handleBackPress()
+        }
+      },
+    )
+  }
+
+  fun setupLocationServices() {
+    if (
+      viewModel.applicationConfiguration.logGpsLocation.contains(LocationLogOptions.QUESTIONNAIRE)
+    ) {
+      fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
+      if (!LocationUtils.isLocationEnabled(this)) {
+        openLocationServicesSettings()
+      }
+
+      if (!hasLocationPermissions()) {
+        showToast(getString(R.string.location_permission_reason))
+        launchLocationPermissionsDialog()
+      }
+
+      if (LocationUtils.isLocationEnabled(this) && hasLocationPermissions()) {
+        fetchLocation(true)
+      }
+    }
+  }
+
+  fun hasLocationPermissions(): Boolean {
+    return PermissionUtils.checkPermissions(
+      this,
+      listOf(
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+      ),
+    )
+  }
+
+  fun openLocationServicesSettings() {
+    activityResultLauncher =
+      PermissionUtils.getStartActivityForResultLauncher(this) { resultCode, _ ->
+        if (resultCode == RESULT_OK || hasLocationPermissions()) {
+          fetchLocation()
+        }
+      }
+
+    val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+    showLocationSettingsDialog(intent)
+  }
+
+  private fun showLocationSettingsDialog(intent: Intent) {
+    viewModel.setProgressState(QuestionnaireProgressState.QuestionnaireLaunch(false))
+    AlertDialog.Builder(this)
+      .setMessage(getString(R.string.location_services_disabled))
+      .setCancelable(true)
+      .setPositiveButton(getString(R.string.yes)) { _, _ -> activityResultLauncher.launch(intent) }
+      .setNegativeButton(getString(R.string.no)) { dialog, _ -> dialog.cancel() }
+      .show()
+  }
+
+  fun launchLocationPermissionsDialog() {
+    locationPermissionLauncher =
+      PermissionUtils.getLocationPermissionLauncher(
+        this,
+        onFineLocationPermissionGranted = { fetchLocation(true) },
+        onCoarseLocationPermissionGranted = { fetchLocation(false) },
+        onLocationPermissionDenied = {
+          Toast.makeText(
+              this,
+              getString(R.string.location_permissions_denied),
+              Toast.LENGTH_SHORT,
+            )
+            .show()
+          Timber.e("Location permissions denied")
+        },
+      )
+
+    locationPermissionLauncher.launch(
+      arrayOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+      ),
+    )
+  }
+
+  fun fetchLocation(highAccuracy: Boolean = true) {
+    lifecycleScope.launch {
+      try {
+        if (highAccuracy) {
+          currentLocation =
+            LocationUtils.getAccurateLocation(fusedLocationClient, dispatcherProvider.io())
+        } else {
+          currentLocation =
+            LocationUtils.getApproximateLocation(fusedLocationClient, dispatcherProvider.io())
+        }
+      } catch (e: Exception) {
+        Timber.e(e, "Failed to get GPS location for questionnaire: ${questionnaireConfig.id}")
+      } finally {
+        if (currentLocation == null) {
+          this@QuestionnaireActivity.showToast("Failed to get GPS location", Toast.LENGTH_LONG)
+        }
+      }
+    }
+  }
+
+  override fun onSaveInstanceState(outState: Bundle) {
+    super.onSaveInstanceState(outState)
+    outState.clear()
+  }
+
+  /** Applies the toolbar chrome. Safe to call on every creation, including a recreated activity. */
+  private fun setupQuestionnaireToolbar() {
+    with(viewBinding) {
+      questionnaireToolbar.apply {
+        setNavigationIcon(R.drawable.ic_arrow_back)
+        setNavigationOnClickListener { handleBackPress() }
+      }
+      questionnaireTitle.apply { text = getString(R.string.add_case) }
+      clearAll.apply {
+        visibility = if (questionnaireConfig.showClearAll) View.VISIBLE else View.GONE
+        setOnClickListener {
+          // TODO Clear current QuestionnaireResponse items -> SDK
+        }
+      }
+    }
+  }
+
+  private fun renderQuestionnaire() {
+    lifecycleScope.launch {
+      if (supportFragmentManager.findFragmentByTag(QUESTIONNAIRE_FRAGMENT_TAG) == null) {
+        viewModel.setProgressState(QuestionnaireProgressState.QuestionnaireLaunch(true))
+
+        questionnaire = viewModel.retrieveQuestionnaire(questionnaireConfig, actionParameters,sharedPreferencesHelper.getLanguageCode())
+
+        val loadedQuestionnaire = questionnaire
+        if (loadedQuestionnaire == null) {
+          // The questionnaire is not in the local database yet — most commonly because the sync
+          // (especially the first-time sync) has not finished downloading it. Show a friendly,
+          // actionable message instead of a technical error and close the screen.
+          Timber.w("Questionnaire ${questionnaireConfig.id} not available locally yet; sync may still be in progress")
+          showToast(getString(R.string.questionnaire_not_found), Toast.LENGTH_LONG)
+          viewModel.setProgressState(QuestionnaireProgressState.QuestionnaireLaunch(false))
+          finish()
+          return@launch
+        }
+
+        try {
+          val questionnaireFragmentBuilder = buildQuestionnaireFragment(loadedQuestionnaire)
+          // Loading the questionnaire suspends, so by now the user may have backgrounded the app and
+          // the FragmentManager may have saved its state — commit() throws IllegalStateException in
+          // that window. Waiting for STARTED commits when the user comes back instead of crashing or
+          // dropping the transaction and leaving the container empty.
+          withStarted {
+            supportFragmentManager.commit {
+              setReorderingAllowed(true)
+              add(R.id.container, questionnaireFragmentBuilder.build(), QUESTIONNAIRE_FRAGMENT_TAG)
+            }
+          }
+
+          registerFragmentResultListener()
+          ScreeningTimer.markStep(screeningId, "questionnaire_loaded")
+        } catch (nullPointerException: NullPointerException) {
+          Timber.e(nullPointerException, "Failed to render questionnaire ${questionnaireConfig.id}")
+          showToast(getString(R.string.questionnaire_not_found), Toast.LENGTH_LONG)
+          finish()
+        } finally {
+          viewModel.setProgressState(QuestionnaireProgressState.QuestionnaireLaunch(false))
+        }
+      }
+    }
+  }
+
+  private suspend fun buildQuestionnaireFragment(
+    questionnaire: Questionnaire,
+  ): QuestionnaireFragment.Builder {
+    if (questionnaire.subjectType.isNullOrEmpty()) {
+      showToast(getString(R.string.missing_subject_type))
+      Timber.e(
+        "Missing subject type on questionnaire. Provide Questionnaire.subjectType to resolve.",
+      )
+      finish()
+    }
+    // Pre-fill the District/State fields from the logged-in FLW's stored location. This overwrites
+    // the questionnaire's hardcoded `initial` defaults so a fresh form opens with the FLW values.
+    // Edit/draft flows supply a saved QuestionnaireResponse which still correctly overrides these.
+    applyFlwLocationInitialValues(questionnaire)
+
+    val questionnaireFragmentBuilder =
+      QuestionnaireFragment.builder()
+        .setQuestionnaire(questionnaire.json())
+        .showReviewPageBeforeSubmit(true)
+        .setCustomQuestionnaireItemViewHolderFactoryMatchersProvider(
+          OPENSRP_ITEM_VIEWHOLDER_FACTORY_MATCHERS_PROVIDER,
+        )
+        .showAsterisk(questionnaireConfig.showRequiredTextAsterisk)
+        .showRequiredText(questionnaireConfig.showRequiredText)
+
+    questionnaireResponse?.takeIf { it.isNotBlank() }?.let {
+      questionnaireFragmentBuilder.setQuestionnaireResponse(it)
+    }
+
+    val questionnaireSubjectType = questionnaire.subjectType.firstOrNull()?.code
+    val resourceType =
+      questionnaireConfig.resourceType ?: questionnaireSubjectType?.let { ResourceType.valueOf(it) }
+    val resourceIdentifier = questionnaireConfig.resourceIdentifier
+
+    if (resourceType != null && !resourceIdentifier.isNullOrEmpty()) {
+      // Add subject and other configured resource to launchContext
+      val launchContextResources =
+        LinkedList<Resource>().apply {
+          viewModel.loadResource(resourceType, resourceIdentifier)?.let { add(it) }
+          addAll(
+            // Exclude the subject resource its already added
+            viewModel.retrievePopulationResources(
+              actionParameters.filterNot {
+                it.paramType == ActionParameterType.QUESTIONNAIRE_RESPONSE_POPULATION_RESOURCE &&
+                  resourceType == it.resourceType &&
+                  resourceIdentifier.equals(it.value, ignoreCase = true)
+              },
+            ),
+          )
+        }
+
+      if (launchContextResources.isNotEmpty()) {
+        questionnaireFragmentBuilder.setQuestionnaireLaunchContextMap(
+          launchContextResources.associate {
+            Pair(it.resourceType.name.lowercase(), it.encodeResourceToString())
+          },
+        )
+      }
+
+      // Populate questionnaire with latest QuestionnaireResponse
+      if (questionnaireConfig.isEditable()) {
+        val latestQuestionnaireResponse =
+          viewModel.searchLatestQuestionnaireResponse(
+            resourceId = resourceIdentifier,
+            resourceType = resourceType,
+            questionnaireId = questionnaire.logicalId,
+          )
+
+        val questionnaireResponse =
+          QuestionnaireResponse().apply {
+            item = latestQuestionnaireResponse?.item
+            // Clearing the text prompts the SDK to re-process the content, which includes HTML
+            clearText()
+          }
+
+        if (viewModel.validateQuestionnaireResponse(questionnaire, questionnaireResponse, this)) {
+          questionnaireFragmentBuilder.setQuestionnaireResponse(questionnaireResponse.json())
+        } else {
+          showToast(getString(R.string.error_populating_questionnaire))
+        }
+      }
+    }
+    return questionnaireFragmentBuilder
+  }
+
+  private fun Resource.json(): String = this.encodeResourceToString()
+
+  /**
+   * Pre-fills the District/State questionnaire items with the FLW's location stored at login (from
+   * the Practitioner resource address). When no value was stored — e.g. the server sent no
+   * district/state — the items are left untouched so the drop-downs open empty. Any unexpected
+   * failure is logged and swallowed so the questionnaire still renders.
+   */
+  private fun applyFlwLocationInitialValues(questionnaire: Questionnaire) {
+    try {
+      val flwDistrict =
+        sharedPreferencesHelper
+          .read(SharedPreferenceKey.FLW_DISTRICT.name, null)
+          ?.trim()
+          ?.takeIf { it.isNotEmpty() }
+      val flwState =
+        sharedPreferencesHelper
+          .read(SharedPreferenceKey.FLW_STATE.name, null)
+          ?.trim()
+          ?.takeIf { it.isNotEmpty() }
+
+      if (flwDistrict == null && flwState == null) return
+
+      questionnaire.item.setFlwLocationInitialValues(district = flwDistrict, state = flwState)
+    } catch (e: Exception) {
+      Timber.e(e, "Failed to pre-fill FLW district/state; leaving the fields empty")
+    }
+  }
+
+  private fun List<Questionnaire.QuestionnaireItemComponent>.setFlwLocationInitialValues(
+    district: String?,
+    state: String?,
+  ) {
+    forEach { item ->
+      when (item.linkId) {
+        FLW_DISTRICT_LINK_ID -> district?.let { item.setInitialValue(it) }
+        FLW_STATE_LINK_ID -> state?.let { item.setInitialValue(it) }
+      }
+      if (item.hasItem()) item.item.setFlwLocationInitialValues(district = district, state = state)
+    }
+  }
+
+  /**
+   * Items with answerOption (drop-downs) cannot carry `initial` (FHIR rule que-11), so the option
+   * matching [value] is flagged `initialSelected` instead; when no option matches the item is left
+   * without a default. Items without answerOption keep using `initial`.
+   *
+   * An exact (trimmed, case-insensitive) match is preferred; otherwise parenthetical aliases and
+   * extra whitespace are ignored so that e.g. a Practitioner address of "Delhi" or "Belagavi"
+   * still selects the "Delhi (NCT)" / "Belagavi (Belgaum)" option.
+   */
+  private fun Questionnaire.QuestionnaireItemComponent.setInitialValue(value: String) {
+    if (hasAnswerOption()) {
+      initial = emptyList()
+      val matchedOption =
+        answerOption.firstOrNull { option ->
+          option.value?.primitiveValue()?.trim().equals(value.trim(), ignoreCase = true)
+        }
+          ?: answerOption.firstOrNull { option ->
+            option.value?.primitiveValue()?.normalizedLocation() == value.normalizedLocation()
+          }
+      answerOption.forEach { option -> option.initialSelected = option === matchedOption }
+    } else {
+      initial =
+        listOf(
+          Questionnaire.QuestionnaireItemInitialComponent().setValue(StringType(value)),
+        )
+    }
+  }
+
+  /** Lowercases and drops parenthetical aliases and redundant whitespace for option matching. */
+  private fun String.normalizedLocation(): String =
+    replace(Regex("\\(.*?\\)"), " ").replace(Regex("\\s+"), " ").trim().lowercase()
+
+  private fun registerFragmentResultListener() {
+    supportFragmentManager.setFragmentResultListener(
+      QuestionnaireFragment.SUBMIT_REQUEST_KEY,
+      this,
+    ) { _, _ ->
+      lifecycleScope.launch {
+        val questionnaireResponse = retrieveQuestionnaireResponse()
+        questionnaireResponse?.language = viewModel.languageCode
+        // Close questionnaire if opened in read only mode or if experimental
+        if (questionnaireConfig.isReadOnly() || questionnaire?.experimental == true) {
+          finish()
+        }
+        if (questionnaireResponse != null && questionnaire != null) {
+          // Single submission per questionnaire session: a double-tap on submit delivers this
+          // fragment result twice and each pass would extract + save a brand new Patient,
+          // registering the same case twice.
+          if (!viewModel.tryStartSubmission()) {
+            Timber.w(
+              "Ignoring duplicate submission of questionnaire ${questionnaireConfig.id}; " +
+                "a submission is already in progress or completed",
+            )
+            return@launch
+          }
+          viewModel.run {
+            if (currentLocation != null) {
+              questionnaireResponse.contained.add(
+                ResourceUtils.createFhirLocationFromGpsLocation(gpsLocation = currentLocation!!),
+              )
+            }
+            val ref = Reference().apply { reference = "Practitioner/${viewModel.getUserName()}" }
+            // set author
+            questionnaireResponse.author = ref
+
+            // Reconcile the screening-image DocumentReferences against the local engine (flip
+            // DRAFT -> SUBMITTED, drop any answer whose DocumentReference is missing locally). The
+            // logic lives in the ViewModel so it is unit tested; the Activity only turns the missing
+            // -reference result into analytics.
+            val docReferenceReconciliation =
+              viewModel.reconcileDocumentReferencesForSubmission(questionnaireResponse)
+            docReferenceReconciliation.missingReferences.forEach { missing ->
+              PostHogAnalytics.captureError(
+                "QuestionnaireActivity",
+                "DocumentReference missing at submit",
+                mapOf(
+                  PostHogAnalytics.Props.DOCUMENT_ID to missing.documentReferenceId,
+                  "link_id" to missing.linkId,
+                  PostHogAnalytics.Props.QUESTIONNAIRE_ID to questionnaireConfig.id,
+                  PostHogAnalytics.Props.SCREENING_ID to screeningId,
+                ),
+              )
+            }
+            // The document could not be flipped to SUBMITTED, so the sync worker will never see it
+            // and its image will never leave the device — silent until now.
+            docReferenceReconciliation.failedFlips.forEach { failed ->
+              PostHogAnalytics.captureError(
+                "QuestionnaireActivity",
+                "DocumentReference flip to SUBMITTED failed; image will not upload",
+                mapOf(
+                  PostHogAnalytics.Props.DOCUMENT_ID to failed.documentReferenceId,
+                  "link_id" to failed.linkId,
+                  PostHogAnalytics.Props.QUESTIONNAIRE_ID to questionnaireConfig.id,
+                  PostHogAnalytics.Props.SCREENING_ID to screeningId,
+                ),
+              )
+            }
+            // Not an error: the image was uploaded and the local row purged, so the reference the
+            // response carries still resolves. Tracked separately so it never gets confused with
+            // the dangling-reference case above.
+            docReferenceReconciliation.uploadedButPurgedIds.forEach { documentId ->
+              PostHogAnalytics.capture(
+                AnalyticsLogger.Events.DOCUMENT_REFERENCE_RESOLVED_FROM_LEDGER,
+                mapOf(
+                  PostHogAnalytics.Props.DOCUMENT_ID to documentId,
+                  PostHogAnalytics.Props.QUESTIONNAIRE_ID to questionnaireConfig.id,
+                  PostHogAnalytics.Props.SCREENING_ID to screeningId,
+                ),
+              )
+            }
+
+            // AI on for the tenant and a model selected. With no model installed (the default
+            // build) the case is submitted exactly as with AI switched off.
+            val aiEnabled = screeningEngine.isAiActive()
+
+            if (aiEnabled) {
+              val aiSummary =
+                viewModel.summarizeAiInference(questionnaireResponse, questionnaire)
+              val outcome = aiSummary.outcome
+              val isSuspicious = aiSummary.isSuspicious
+              val suspiciousImages = aiSummary.suspiciousImages
+
+              // Read by the registration StructureMap's case-level AI rule. "suspicious" and
+              // "non-suspicious" keep their original meaning; "inconclusive" is new.
+              questionnaireResponse.addItem(
+                caseLevelItem(CASE_LEVEL_AI_RESULT_LINK_ID, outcome.caseLevelValue),
+              )
+              // The model's own class for the case (e.g. "opmd"), for multi-class models.
+              aiSummary.caseClassId?.let {
+                questionnaireResponse.addItem(caseLevelItem(CASE_LEVEL_AI_CLASS_LINK_ID, it))
+              }
+
+              val aiInferenceProps =
+                questionnaireAnalyticsProps(
+                    PostHogAnalytics.Props.IS_SUSPICIOUS to isSuspicious,
+                    PostHogAnalytics.Props.IMAGE_COUNT to aiSummary.imageCount,
+                    PostHogAnalytics.Props.SUSPICIOUS_IMAGE_COUNT to aiSummary.suspiciousImageCount,
+                    PostHogAnalytics.Props.NON_SUSPICIOUS_IMAGE_COUNT to aiSummary.nonSuspiciousImageCount,
+                    PostHogAnalytics.Props.LOW_CONFIDENCE_IMAGE_COUNT to aiSummary.lowConfidenceImageCount,
+                    PostHogAnalytics.Props.MEAN_CONFIDENCE to aiSummary.meanConfidence,
+                    PostHogAnalytics.Props.AI_OUTCOME to outcome.name,
+                    PostHogAnalytics.Props.AI_CLASS to aiSummary.caseClassId,
+                    PostHogAnalytics.Props.MODEL_ID to aiSummary.modelId,
+                    PostHogAnalytics.Props.INCONCLUSIVE_IMAGE_COUNT to aiSummary.inconclusiveImageCount,
+                    PostHogAnalytics.Props.FAILED_IMAGE_COUNT to aiSummary.failedImageCount,
+                  )
+                  .toMutableMap()
+                  .apply { putAll(DeviceMetrics.snapshot(this@QuestionnaireActivity)) }
+              PostHogAnalytics.capture(
+                PostHogAnalytics.Events.AI_INFERENCE_COMPLETED,
+                aiInferenceProps,
+              )
+              Timber.d("=== About to launch AIResultActivity ===")
+              currentQR = questionnaireResponse
+              caseOutcome = outcome
+              val caseClass = screeningEngine.classDescriptor(aiSummary.modelId, aiSummary.caseClassId)
+
+              ScreeningTimer.markStep(screeningId, "submission_started")
+              viewModel.setProgressState(QuestionnaireProgressState.ExtractionInProgress(true))
+              viewModel.handleQuestionnaireSubmission(
+                questionnaire = questionnaire!!,
+                currentQuestionnaireResponse = questionnaireResponse,
+                questionnaireConfig = questionnaireConfig,
+                actionParameters = actionParameters,
+                context = this@QuestionnaireActivity,
+                onSubmissionAbandoned = ::releaseQuestionnaireSubmissionLock,
+                onIncompleteSubmission = ::reportIncompleteSubmission,
+              ) { idTypes, qrResult ->
+                viewModel.setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+                submissionIdTypes = idTypes
+                submissionQRResult = qrResult
+                ScreeningTimer.markStep(screeningId, "submission_completed")
+
+                val intent = Intent(this@QuestionnaireActivity, AIResultActivity::class.java)
+                intent.putExtra(AIResultActivity.EXTRA_OUTCOME, outcome.name)
+                intent.putExtra(AIResultActivity.EXTRA_IS_SUSPICIOUS, isSuspicious)
+                intent.putStringArrayListExtra(AIResultActivity.EXTRA_IMAGES, ArrayList(suspiciousImages))
+                // A model may word its result screen itself ("Refer to a dermatologist"), in the
+                // app's chosen language (per-app locale, not necessarily the device's).
+                val locale = resources.configuration.locales[0]
+                caseClass?.resultTitle?.localized(locale)?.let {
+                  intent.putExtra(AIResultActivity.EXTRA_TITLE, it)
+                }
+                caseClass?.resultDescription?.localized(locale)?.let {
+                  intent.putExtra(AIResultActivity.EXTRA_DESCRIPTION, it)
+                }
+                intent.putExtra("questionnaireResponseId", qrResult.logicalId)
+                intent.putExtra(PostHogAnalytics.Props.SCREENING_ID, screeningId)
+                aiResultLauncher.launch(intent)
+              }
+            } else {
+              // AI inference disabled — skip AI result screen and submit directly
+              Timber.d("=== AI inference disabled, submitting directly ===")
+              PostHogAnalytics.capture(
+                PostHogAnalytics.Events.QUESTIONNAIRE_SUBMITTED,
+                questionnaireAnalyticsProps(
+                  PostHogAnalytics.Props.AI_VERDICT to "disabled",
+                  PostHogAnalytics.Props.AI_OVERRIDDEN to false,
+                ),
+              )
+              ScreeningTimer.markStep(screeningId, "submission_started")
+              viewModel.setProgressState(QuestionnaireProgressState.ExtractionInProgress(true))
+              viewModel.handleQuestionnaireSubmission(
+                questionnaire = questionnaire!!,
+                currentQuestionnaireResponse = questionnaireResponse,
+                questionnaireConfig = questionnaireConfig,
+                actionParameters = actionParameters,
+                context = this@QuestionnaireActivity,
+                onSubmissionAbandoned = ::releaseQuestionnaireSubmissionLock,
+                onIncompleteSubmission = ::reportIncompleteSubmission,
+              ) { idTypes, qrResult ->
+                viewModel.setProgressState(QuestionnaireProgressState.ExtractionInProgress(false))
+                ScreeningTimer.markStep(screeningId, "submission_completed")
+                ScreeningTimer.end(
+                  screeningId,
+                  outcome = "submitted",
+                  extraProps = screeningCompletionProps(),
+                )
+                setResult(
+                  Activity.RESULT_OK,
+                  Intent().apply {
+                    putExtra(QUESTIONNAIRE_RESPONSE, qrResult as Serializable)
+                    putExtra(QUESTIONNAIRE_SUBMISSION_EXTRACTED_RESOURCE_IDS, idTypes as Serializable)
+                    putExtra(QUESTIONNAIRE_CONFIG, questionnaireConfig as Parcelable)
+                  },
+                )
+                finish()
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private fun findQuestionnaireItemByLinkId(
+    questionnaire: Questionnaire,
+    linkId: String
+  ): Questionnaire.QuestionnaireItemComponent? {
+    fun searchItems(items: List<Questionnaire.QuestionnaireItemComponent>): Questionnaire.QuestionnaireItemComponent? {
+      for (item in items) {
+        if (item.linkId == linkId) return item
+        val found = searchItems(item.item)
+        if (found != null) return found
+      }
+      return null
+    }
+    return searchItems(questionnaire.item)
+  }
+
+  private fun handleBackPress() {
+    // A submission owns the screen from the moment the user taps Submit. Extraction, the
+    // DocumentReference reconciliation and — when the AI flag is on — image inference all run
+    // *before* the progress dialog goes up, so for several seconds there is no modal to swallow the
+    // hardware back button. Saving a draft in that window is what produced the case-plus-draft pair
+    // QA reported: reopening that draft and submitting it registered the case a second time, minus
+    // the screening images, because the first submission had already flipped those
+    // DocumentReferences to SUBMITTED and the sync worker had purged them locally.
+    if (viewModel.isSubmissionInFlight()) {
+      Timber.w(
+        "Back pressed while questionnaire ${questionnaireConfig.id} is being submitted; ignoring",
+      )
+      PostHogAnalytics.capture(
+        PostHogAnalytics.Events.BACK_PRESSED_DURING_SUBMISSION,
+        questionnaireAnalyticsProps(),
+      )
+      showToast(getString(R.string.submission_in_progress))
+      return
+    }
+
+    if (questionnaireConfig.isReadOnly()) {
+      finish()
+    } else if (questionnaireConfig.saveDraft) {
+      // One draft per session. Without this guard, repeated fast presses would each stack a progress
+      // dialog, a saveDraftQuestionnaire() call and an observeForever(); and because _isDraftSaved
+      // latches to true, every observer after the first would fire immediately, dismissing the
+      // dialog and finishing the activity before its own write landed.
+      if (!viewModel.tryStartDraftSave()) {
+        Timber.d("Draft save already under way for ${questionnaireConfig.id}; ignoring back press")
+        return
+      }
+
+      val dialogue = AlertDialogue.showProgressAlert(this, R.string.extraction_in_progress)
+
+      lifecycleScope.launch {
+        val questionnaireResponse = retrieveQuestionnaireResponse()
+        if (questionnaireResponse == null) {
+          // Nothing to save — but the dialog is already up, so it has to come down explicitly or
+          // the user is stranded on a spinner.
+          Timber.w("No questionnaire response to save as draft for ${questionnaireConfig.id}")
+          dialogue.dismiss()
+          finish()
+          return@launch
+        }
+        viewModel.saveDraftQuestionnaire(questionnaireResponse) { draftSaved ->
+          // An untouched form is abandoned, not drafted — reporting it as a saved draft would
+          // overstate draft usage and hide how often FLWs open the form and back straight out.
+          if (draftSaved) {
+            PostHogAnalytics.capture(
+              PostHogAnalytics.Events.QUESTIONNAIRE_DRAFT_SAVED,
+              questionnaireAnalyticsProps(),
+            )
+          }
+          ScreeningTimer.end(
+            screeningId,
+            outcome = if (draftSaved) "draft_saved" else "abandoned",
+            extraProps = screeningCompletionProps(),
+          )
+          dialogue.dismiss()
+          finish()
+        }
+      }
+    } else {
+      AlertDialogue.showConfirmAlert(
+        context = this,
+        message =
+          org.smartregister.fhircore.engine.R.string.questionnaire_alert_back_pressed_message,
+        title = org.smartregister.fhircore.engine.R.string.questionnaire_alert_back_pressed_title,
+        confirmButtonListener = {
+          ScreeningTimer.end(
+            screeningId,
+            outcome = "abandoned",
+            extraProps = screeningCompletionProps(),
+          )
+          finish()
+        },
+        confirmButtonText =
+          org.smartregister.fhircore.engine.R.string.questionnaire_alert_back_pressed_button_title,
+      )
+    }
+  }
+
+  fun activeScreeningId(): String? = screeningId
+
+  private fun isFreshRegistrationQuestionnaire(): Boolean =
+    !questionnaireConfig.isReadOnly() &&
+      !questionnaireConfig.isEditable() &&
+      questionnaireKind() == "registration"
+
+  private fun questionnaireKind(): String {
+    val configText = "${questionnaireConfig.id} ${questionnaireConfig.title.orEmpty()}".lowercase()
+    return when {
+      configText.contains("follow") -> "followup"
+      configText.contains("registration") || configText.contains("register") -> "registration"
+      !questionnaireConfig.isReadOnly() &&
+        !questionnaireConfig.isEditable() &&
+        questionnaireConfig.resourceIdentifier.isNullOrBlank() -> "registration"
+      else -> "other"
+    }
+  }
+
+  private fun caseLevelItem(linkId: String, value: String) =
+    QuestionnaireResponse.QuestionnaireResponseItemComponent().apply {
+      this.linkId = linkId
+      addAnswer(
+        QuestionnaireResponse.QuestionnaireResponseItemAnswerComponent().apply {
+          this.value = StringType(value)
+        },
+      )
+    }
+
+  private fun questionnaireAnalyticsProps(
+    vararg extras: Pair<String, Any?>,
+  ): Map<String, Any?> =
+    mutableMapOf<String, Any?>(
+        PostHogAnalytics.Props.QUESTIONNAIRE_ID to
+          (if (::questionnaireConfig.isInitialized) questionnaireConfig.id else "unknown"),
+        PostHogAnalytics.Props.QUESTIONNAIRE_KIND to
+          (if (::questionnaireConfig.isInitialized) questionnaireKind() else "other"),
+        PostHogAnalytics.Props.SCREENING_ID to screeningId,
+      )
+      .apply { extras.forEach { (key, value) -> put(key, value) } }
+
+  private fun screeningCompletionProps(
+    vararg extras: Pair<String, Any?>,
+  ): Map<String, Any?> =
+    mutableMapOf<String, Any?>(
+        PostHogAnalytics.Props.QUESTIONNAIRE_ID to
+          (if (::questionnaireConfig.isInitialized) questionnaireConfig.id else "unknown"),
+        PostHogAnalytics.Props.QUESTIONNAIRE_KIND to
+          (if (::questionnaireConfig.isInitialized) questionnaireKind() else "other"),
+      )
+      .apply {
+        putAll(DeviceMetrics.snapshot(this@QuestionnaireActivity))
+        extras.forEach { (key, value) -> put(key, value) }
+      }
+
+  private suspend fun retrieveQuestionnaireResponse(): QuestionnaireResponse? =
+    (supportFragmentManager.findFragmentByTag(QUESTIONNAIRE_FRAGMENT_TAG) as QuestionnaireFragment?)
+      ?.getQuestionnaireResponse()
+
+  /**
+   * Names the required questions that stopped the submission, so the user can go and fill them in
+   * rather than tapping a submit button that keeps refusing without saying why. Nothing has been
+   * saved at this point, and [releaseQuestionnaireSubmissionLock] follows, so the form stays open
+   * and submittable.
+   */
+  private fun reportIncompleteSubmission(unanswered: List<UnansweredRequiredQuestion>) {
+    PostHogAnalytics.capture(
+      PostHogAnalytics.Events.SUBMISSION_BLOCKED_INCOMPLETE,
+      questionnaireAnalyticsProps(
+        "missing_link_ids" to unanswered.joinToString { it.linkId },
+        "missing_count" to unanswered.size,
+      ),
+    )
+    AlertDialogue.showErrorAlert(
+      context = this,
+      message =
+        getString(
+          R.string.submission_blocked_message,
+          unanswered.joinToString(separator = "\n") { "• ${it.label}" },
+        ),
+      title = getString(R.string.submission_blocked_title),
+    )
+  }
+
+  /**
+   * Lets the user submit again after a submission that saved nothing. The data capture library locks
+   * its submit button when it hands over a response and holds the lock for the whole
+   * extract-and-save window — that is what stops repeated taps registering the same case twice — so
+   * an abandoned submission has to hand the button back explicitly.
+   */
+  private fun releaseQuestionnaireSubmissionLock() {
+    (supportFragmentManager.findFragmentByTag(QUESTIONNAIRE_FRAGMENT_TAG) as QuestionnaireFragment?)
+      ?.releaseSubmissionLock()
+  }
+
+  companion object {
+
+    const val QUESTIONNAIRE_FRAGMENT_TAG = "questionnaireFragment"
+    const val QUESTIONNAIRE_CONFIG = "questionnaireConfig"
+    const val QUESTIONNAIRE_SUBMISSION_EXTRACTED_RESOURCE_IDS = "questionnaireExtractedResourceIds"
+    const val QUESTIONNAIRE_RESPONSE = "questionnaireResponse"
+    const val QUESTIONNAIRE_ACTION_PARAMETERS = "questionnaireActionParameters"
+    const val QUESTIONNAIRE_RESPONSE_PREFILL = "questionnaireResponsePrefill"
+    const val QUESTIONNAIRE_POPULATION_RESOURCES = "questionnairePopulationResources"
+
+    fun intentBundle(
+      questionnaireConfig: QuestionnaireConfig,
+      actionParams: List<ActionParameter>,
+    ): Bundle =
+      bundleOf(
+        Pair(QUESTIONNAIRE_CONFIG, questionnaireConfig),
+        Pair(QUESTIONNAIRE_ACTION_PARAMETERS, actionParams),
+      )
+  }
+}
+
+/** `case-level-ai-result` value the registration StructureMap reads. */
+private val Outcome.caseLevelValue: String
+  get() =
+    when (this) {
+      Outcome.POSITIVE -> "suspicious"
+      Outcome.NEGATIVE -> "non-suspicious"
+      Outcome.INCONCLUSIVE -> "inconclusive"
+    }
+
+/** `ai_verdict` analytics value. */
+private val Outcome.verdict: String
+  get() =
+    when (this) {
+      Outcome.POSITIVE -> "suspicious"
+      Outcome.NEGATIVE -> "non_suspicious"
+      Outcome.INCONCLUSIVE -> "inconclusive"
+    }

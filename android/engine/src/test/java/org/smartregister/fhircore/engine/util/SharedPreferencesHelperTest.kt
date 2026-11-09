@@ -1,0 +1,203 @@
+/*
+ * Copyright 2021-2024 Ona Systems, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.smartregister.fhircore.engine.util
+
+import android.app.Application
+import androidx.arch.core.executor.testing.InstantTaskExecutorRule
+import androidx.test.core.app.ApplicationProvider
+import com.google.gson.Gson
+import dagger.hilt.android.testing.HiltAndroidRule
+import dagger.hilt.android.testing.HiltAndroidTest
+import javax.inject.Inject
+import org.junit.Assert
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.smartregister.fhircore.engine.configuration.QuestionnaireConfig
+import org.smartregister.fhircore.engine.robolectric.RobolectricTest
+
+@HiltAndroidTest
+internal class SharedPreferencesHelperTest : RobolectricTest() {
+  @get:Rule(order = 0) val hiltRule = HiltAndroidRule(this)
+
+  @get:Rule(order = 1) val instantTaskExecutorRule = InstantTaskExecutorRule()
+  private val application = ApplicationProvider.getApplicationContext<Application>()
+  private lateinit var sharedPreferencesHelper: SharedPreferencesHelper
+
+  @Inject lateinit var gson: Gson
+
+  @Before
+  fun setUp() {
+    hiltRule.inject()
+    sharedPreferencesHelper = SharedPreferencesHelper(application, gson)
+  }
+
+  /**
+   * Exercises the real Gson adapter for [AppUpdateConfig]. Mocking [SharedPreferencesHelper]
+   * elsewhere meant `toJson` was never called, which is how a `@SerializedName(alternate = …)`
+   * mapping that Gson refuses to build reached a device: it threw inside the flag refresh, the
+   * caller swallowed it, and neither update prompt ever rendered.
+   */
+  @Test
+  fun testAppUpdateConfigSurvivesAPersistenceRoundTrip() {
+    val config =
+      AppUpdateConfig(
+        minSupportedVersionCode = 50,
+        latestVersionCode = 55,
+        latestVersionName = "AA_v1.7.8",
+        softMessage = "Faster case sync and a fix for lost photos.",
+        forcedMessage = "App is 6 months out of date",
+      )
+
+    sharedPreferencesHelper.saveLastKnownAppUpdateConfig("feature-flags", config)
+
+    Assert.assertEquals(config, sharedPreferencesHelper.getLastKnownAppUpdateConfig("feature-flags"))
+  }
+
+  /** A config persisted before the split has one shared `message`; it must back both prompts. */
+  @Test
+  fun testPersistedLegacyMessageBackFillsBothPrompts() {
+    val legacyJson =
+      """{"minSupportedVersionCode":50,"latestVersionCode":55,"latestVersionName":"AA_v1.7.8",""" +
+        """"message":"A new version is available. Please update."}"""
+    sharedPreferencesHelper.write("APP_UPDATE_CONFIG_feature-flags", legacyJson)
+
+    val config = sharedPreferencesHelper.getLastKnownAppUpdateConfig("feature-flags")
+
+    Assert.assertEquals("A new version is available. Please update.", config.softMessage)
+    Assert.assertEquals("A new version is available. Please update.", config.forcedMessage)
+    Assert.assertEquals(50, config.minSupportedVersionCode)
+  }
+
+  @Test
+  fun testUnsetAppUpdateConfigReadsBackAsNone() {
+    Assert.assertEquals(
+      AppUpdateConfig.NONE,
+      sharedPreferencesHelper.getLastKnownAppUpdateConfig("never-written"),
+    )
+  }
+
+  @Test
+  fun testReadString() {
+    Assert.assertNotNull(sharedPreferencesHelper.read("anyStringKey", ""))
+  }
+
+  @Test
+  fun testReadBoolean() {
+    Assert.assertNotNull(sharedPreferencesHelper.read("anyBooleanKey", false))
+  }
+
+  @Test
+  fun testReadLong() {
+    Assert.assertNotNull(sharedPreferencesHelper.read("anyBooleanKey", 0))
+  }
+
+  @Test
+  fun testWriteString() {
+    sharedPreferencesHelper.write("anyStringKey", "test write String")
+    Assert.assertEquals("test write String", sharedPreferencesHelper.read("anyStringKey", ""))
+  }
+
+  @Test
+  fun testWriteBoolean() {
+    sharedPreferencesHelper.write("anyBooleanKey", true)
+    Assert.assertEquals(true, sharedPreferencesHelper.read("anyBooleanKey", false))
+  }
+
+  @Test
+  fun testWriteLong() {
+    sharedPreferencesHelper.write("anyLongKey", 123456789)
+    Assert.assertEquals(123456789, sharedPreferencesHelper.read("anyLongKey", 0))
+  }
+
+  @Test
+  fun writeObjectUsingSerialized() {
+    val questionnaireConfig = QuestionnaireConfig(id = "123", title = "my-questionnaire")
+    sharedPreferencesHelper.write("object", questionnaireConfig)
+    Assert.assertEquals(
+      questionnaireConfig.id,
+      sharedPreferencesHelper.read<QuestionnaireConfig>("object")?.id,
+    )
+  }
+
+  @Test
+  fun testResetSharedPrefsClearsData() {
+    sharedPreferencesHelper.write("anyBooleanKey", true)
+    sharedPreferencesHelper.write("anyLongKey", 123456789)
+
+    Assert.assertEquals(123456789, sharedPreferencesHelper.read("anyLongKey", 0))
+    Assert.assertEquals(true, sharedPreferencesHelper.read("anyBooleanKey", false))
+
+    sharedPreferencesHelper.resetSharedPrefs()
+
+    Assert.assertEquals(0, sharedPreferencesHelper.read("anyLongKey", 0))
+    Assert.assertEquals(false, sharedPreferencesHelper.read("anyBooleanKey", false))
+  }
+
+  @Test
+  fun testRemove() {
+    // removing a nonexistent key does not throw an exception
+    sharedPreferencesHelper.remove("anyBooleanKey")
+
+    sharedPreferencesHelper.write("anyBooleanKey", true)
+    Assert.assertTrue(sharedPreferencesHelper.read("anyBooleanKey", false))
+    sharedPreferencesHelper.remove("anyBooleanKey")
+    Assert.assertFalse(sharedPreferencesHelper.read("anyBooleanKey", false))
+  }
+
+  @Test
+  fun testRetrieveApplicationId() {
+    sharedPreferencesHelper.write(SharedPreferenceKey.APP_ID.name, "test.demo")
+
+    val retrievedAppId = sharedPreferencesHelper.retrieveApplicationId()
+
+    Assert.assertEquals("test.demo", retrievedAppId)
+  }
+
+  @Test
+  fun testGetSyncMetadataResourceIdMultiTenantReturnsPrefixedId() {
+    sharedPreferencesHelper.saveTenant("staging-2", multiTenant = true)
+    Assert.assertEquals(
+      "sync-metadata-staging-2-abc123",
+      sharedPreferencesHelper.getSyncMetadataResourceId("abc123"),
+    )
+  }
+
+  @Test
+  fun testGetSyncMetadataResourceIdSingleTenantReturnsBareId() {
+    sharedPreferencesHelper.saveTenant(null, multiTenant = false)
+    Assert.assertEquals(
+      "sync-metadata-abc123",
+      sharedPreferencesHelper.getSyncMetadataResourceId("abc123"),
+    )
+  }
+
+  @Test
+  fun testGetFeatureFlagsResourceIdMultiTenantReturnsPrefixedId() {
+    sharedPreferencesHelper.saveTenant("staging-2", multiTenant = true)
+    Assert.assertEquals(
+      "staging-2-feature-flags",
+      sharedPreferencesHelper.getFeatureFlagsResourceId(),
+    )
+  }
+
+  @Test
+  fun testGetFeatureFlagsResourceIdSingleTenantReturnsBareId() {
+    sharedPreferencesHelper.saveTenant(null, multiTenant = false)
+    Assert.assertEquals("feature-flags", sharedPreferencesHelper.getFeatureFlagsResourceId())
+  }
+}
