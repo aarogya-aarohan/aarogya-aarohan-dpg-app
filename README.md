@@ -1,6 +1,6 @@
 # Aarogya Aarohan
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.txt)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Aarogya Aarohan is an offline-first Android app for community health workers. They use it to
 register people, run oral cancer screening (a questionnaire and photos), and sync the records to a
@@ -76,4 +76,4 @@ their original copyright headers.
 
 ## License
 
-[Apache License 2.0](LICENSE.txt)
+[Apache License 2.0](LICENSE)
